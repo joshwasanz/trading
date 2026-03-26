@@ -49,7 +49,7 @@ export default function Chart({
       height: 0,
       handleScroll: {
         mouseWheel: true,
-        pressedMouseMove: false,
+        pressedMouseMove: true,
       },
       handleScale: {
         mouseWheel: true,
