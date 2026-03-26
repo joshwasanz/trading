@@ -132,13 +132,15 @@ export default function LayoutManager({
   }
 
   return (
-    <div style={{ width: "100%", height: "100%", overflow: "hidden" }}>
-      <GridLayout
-        key={`layout-${layoutType}`}
-        className="layout"
-        layout={layout}
-        width={Math.max(windowWidth - 20, 1)}
-      >
+    <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
+      <div style={{ flex: 1, overflow: "hidden", width: "100%", minHeight: 0 }}>
+        <GridLayout
+          key={`layout-${layoutType}`}
+          className="layout"
+          layout={layout}
+          width={Math.max(windowWidth - 20, 1)}
+          rowHeight={window.innerHeight / 2.5}
+        >
         {layout.map((item) => {
           const symbol = chartConfigs[item.i] ?? defaultSymbolForItem(item.i);
           const chartData = data?.[symbol] ?? [];
@@ -169,6 +171,7 @@ export default function LayoutManager({
           );
         })}
       </GridLayout>
+      </div>
     </div>
   );
 }
