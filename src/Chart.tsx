@@ -35,15 +35,24 @@ export default function Chart({
   const seriesRef = useRef<any>(null);
   const activeChartRef = useRef<string | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const isMountedRef = useRef(true);
 
   useEffect(() => {
     activeChartRef.current = activeChart ?? null;
   }, [activeChart]);
 
   useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!chartContainerRef.current) return;
 
+    isMountedRef.current = true;
     const container = chartContainerRef.current;
+    console.log(`[${symbol}] Creating chart...`);
     const chart = createChart(container, {
       width: 0,
       height: 0,
@@ -96,6 +105,7 @@ export default function Chart({
     resizeObserverRef.current.observe(container);
 
     const handleMouseDown = () => {
+      console.log(`[${symbol}] Chart focused`);
       setActiveChart?.(symbol);
     };
 
@@ -112,7 +122,11 @@ export default function Chart({
       onTimeRangeChange?.(range, symbol);
     });
 
+    console.log(`[${symbol}] Chart initialized and listeners subscribed ✓`);
+
     return () => {
+      console.log(`[${symbol}] Cleaning up chart...`);
+      isMountedRef.current = false;
       container.removeEventListener("mousedown", handleMouseDown);
       resizeObserverRef.current?.disconnect();
       chart.remove();
@@ -120,46 +134,54 @@ export default function Chart({
   }, []);
 
   useEffect(() => {
-    if (!chartRef.current || !externalTime) return;
-    chartRef.current.setCrosshairPosition(
-      0,
-      externalTime as any,
-      seriesRef.current
-    );
+    if (!isMountedRef.current || !chartRef.current || !externalTime || !seriesRef.current) return;
+    
+    try {
+      chartRef.current.setCrosshairPosition(
+        0,
+        externalTime as any,
+        seriesRef.current
+      );
+    } catch (error) {
+      // Chart might be in process of being destroyed, ignore silently
+      console.debug("Could not set crosshair position:", error);
+    }
   }, [externalTime]);
 
   useEffect(() => {
-    if (!chartRef.current || !externalRange) return;
+    if (!isMountedRef.current || !chartRef.current || !externalRange) return;
     if (activeChart === symbol) return;
-    chartRef.current.timeScale().setVisibleLogicalRange(externalRange);
+    
+    try {
+      chartRef.current.timeScale().setVisibleLogicalRange(externalRange);
+    } catch (error) {
+      console.debug("Could not set visible logical range:", error);
+    }
   }, [externalRange, activeChart, symbol]);
 
   useEffect(() => {
-    if (!seriesRef.current || data.length === 0) return;
-
-    if (data.length === 1) {
-      seriesRef.current.setData([
-        {
-          time: data[0].time as any,
-          open: data[0].open,
-          high: data[0].high,
-          low: data[0].low,
-          close: data[0].close,
-        },
-      ]);
-    } else {
-      const last = data[data.length - 1];
-      seriesRef.current.update({
-        time: last.time as any,
-        open: last.open,
-        high: last.high,
-        low: last.low,
-        close: last.close,
-      });
+    if (!isMountedRef.current || !seriesRef.current || data.length === 0) {
+      console.debug(`[${symbol}] Skipping data update - mounted:${isMountedRef.current}, hasData:${data.length > 0}`);
+      return;
     }
 
-    if (data.length <= 1) {
-      chartRef.current.timeScale().fitContent();
+    console.log(`[${symbol}] Updating chart with ${data.length} candles`);
+    try {
+      seriesRef.current.setData(
+        data.map((candle) => ({
+          time: candle.time as any,
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+        }))
+      );
+
+      if (data.length <= 1 && chartRef.current) {
+        chartRef.current.timeScale().fitContent();
+      }
+    } catch (error) {
+      console.debug("Could not update chart data:", error);
     }
   }, [data]);
 

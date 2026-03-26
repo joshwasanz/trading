@@ -1,7 +1,10 @@
 use std::thread;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 use rand::Rng;
 use serde::Serialize;
+
+static STREAMS_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Serialize, Clone)]
 struct Candle {
@@ -67,6 +70,10 @@ fn start_symbol_stream(app: tauri::AppHandle, symbol: &str, base_price: f64) {
 
 #[tauri::command]
 fn start_all_streams(app: tauri::AppHandle) {
+    if STREAMS_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
     start_symbol_stream(app.clone(), "nq", 18000.0);
     start_symbol_stream(app.clone(), "es", 5000.0);
 }

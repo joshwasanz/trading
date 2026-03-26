@@ -4,6 +4,7 @@ type Props = {
   symbol: string;
   data: any[];
   onFocus: () => void;
+  onSymbolChange?: (symbol: string) => void;
   activeChart?: string | null;
   setActiveChart?: (s: string) => void;
   onCrosshairMove?: (t: number) => void;
@@ -16,6 +17,7 @@ export default function ChartPanel({
   symbol,
   data,
   onFocus,
+  onSymbolChange,
   activeChart,
   setActiveChart,
   onCrosshairMove,
@@ -24,50 +26,27 @@ export default function ChartPanel({
   externalRange,
 }: Props) {
   return (
-    <div
-      className="chart-panel"
-      style={{
-        background: "#151518",
-        borderRadius: "8px",
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
-        border: "1px solid #2a2a2e",
-        overflow: "hidden",
-      }}
-    >
+    <div className="chart-panel">
       {/* Header / drag handle */}
-      <div
-        className="chart-panel__drag-handle"
-        style={{
-          padding: "6px 10px",
-          borderBottom: "1px solid #2a2a2e",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          fontSize: "12px",
-          color: "#ccc",
-          userSelect: "none",
-          flexShrink: 0,
-          cursor: "move",
-        }}
-      >
-        <span 
-          style={{ fontWeight: 600, letterSpacing: "0.05em" }}
+      <div className="chart-panel__drag-handle">
+        <select
+          value={symbol}
+          onChange={(e) => onSymbolChange?.(e.target.value)}
+          onMouseDown={(e) => e.stopPropagation()}
         >
-          {symbol.toUpperCase()}
-        </span>
+          <option value="nq">NQ</option>
+          <option value="es">ES</option>
+          <option value="dax">DAX</option>
+          <option value="dxy">DXY</option>
+          <option value="us10y">US10Y</option>
+          <option value="gold">GOLD</option>
+        </select>
         <button
           className="chart-panel__focus"
           onClick={onFocus}
           onMouseDown={(event) => event.stopPropagation()}
           style={{
-            background: "none",
-            border: activeChart === symbol ? "1px solid #4da3ff" : "1px solid #2a2a2e",
-            color: "#888",
-            cursor: "pointer",
-            fontSize: "14px",
-            padding: "0 4px",
+            borderColor: activeChart === symbol ? "#4da3ff" : "#2a2a2e",
           }}
         >
           ⤢
@@ -77,11 +56,6 @@ export default function ChartPanel({
       {/* Chart */}
       <div
         className="chart-panel__body"
-        style={{ 
-          flex: 1, 
-          overflow: "hidden",
-          touchAction: "manipulation"
-        }}
         onMouseDown={(e) => {
           // Prevent grid dragging when clicking on chart area
           if (e.target !== e.currentTarget) {
