@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import TopBar from "./components/TopBar";
 import LayoutManager from "./layout/LayoutManager";
+import Sidebar from "./components/SideBar";
+import { useToolStore } from "./store/useToolStore";
 
 type Candle = {
   symbol: string;
@@ -13,135 +15,151 @@ type Candle = {
   close: number;
 };
 
-type DataState = {
-  [key: string]: Candle[];
-};
+type Timeframe = "15s" | "1m" | "3m";
 
-const initialDataState: DataState = {
-  nq: [],
-  es: [],
-  dax: [],
-  dxy: [],
-  us10y: [],
-  gold: [],
+// 🔥 INITIAL DATA PER SYMBOL + TF
+const initialDataState: Record<string, Record<Timeframe, Candle[]>> = {
+  nq: { "15s": [], "1m": [], "3m": [] },
+  es: { "15s": [], "1m": [], "3m": [] },
 };
 
 let startStreamsPromise: Promise<void> | null = null;
 
+// ==================== UPSERT ====================
+function upsertCandleSeries(current: Candle[], incoming: Candle): Candle[] {
+  const MAX = 500; // 🔥 prevent memory bloat
+
+  if (current.length === 0) return [incoming];
+
+  const next = [...current];
+  const lastIndex = next.length - 1;
+  const last = next[lastIndex];
+
+  if (incoming.time > last.time) {
+    next.push(incoming);
+  } else if (incoming.time === last.time) {
+    next[lastIndex] = incoming;
+  }
+
+  // 🔥 LIMIT SIZE
+  if (next.length > MAX) {
+    next.splice(0, next.length - MAX);
+  }
+
+  return next;
+}
+
+// ==================== APP ====================
 function App() {
-  const [data, setData] = useState<DataState>(initialDataState);
-  const dataRef = useRef<DataState>(initialDataState);
+  const [data, setData] = useState(initialDataState);
+  const dataRef = useRef(initialDataState);
+
   const [crosshairTime, setCrosshairTime] = useState<number | null>(null);
   const [timeRange, setTimeRange] = useState<any>(null);
   const [activeChart, setActiveChart] = useState<string | null>(null);
   const [layoutType, setLayoutType] = useState("2");
 
+  // 🔥 TOOL ENGINE
+  const { tool } = useToolStore();
+
+  // ==================== STREAM SETUP ====================
   useEffect(() => {
-    function updateSymbol(symbol: string, candle: Candle, isNew: boolean) {
-      const current = dataRef.current[symbol] || [];
-      let updated: Candle[];
-
-      if (isNew) {
-        updated = [...current, candle];
-      } else if (current.length === 0) {
-        updated = [candle];
-      } else {
-        updated = [...current];
-        updated[updated.length - 1] = candle;
-      }
-
-      const newState = { ...dataRef.current, [symbol]: updated };
-      dataRef.current = newState;
-      setData(newState);
-    }
-
     let cancelled = false;
     const unlisteners: Array<() => void> = [];
 
-    async function registerListener(
-      eventName: string,
-      symbol: string,
-      isNew: boolean
-    ) {
-      console.log(`Installing: ${eventName}`);
+    function updateSymbol(symbol: string, tf: Timeframe, candle: Candle) {
+      const current = dataRef.current[symbol][tf] || [];
+      const updated = upsertCandleSeries(current, candle);
 
-      const unlisten = await listen<Candle>(eventName, (event) => {
-        if (!cancelled) {
-          updateSymbol(symbol, event.payload, isNew);
-        }
-      });
+      const nextState = {
+        ...dataRef.current,
+        [symbol]: {
+          ...dataRef.current[symbol],
+          [tf]: updated,
+        },
+      };
 
-      if (cancelled) {
-        unlisten();
-        return;
-      }
-
-      unlisteners.push(unlisten);
+      dataRef.current = nextState;
+      setData(nextState);
     }
 
-    async function setupListenersAndStart() {
+    async function register(symbol: string, tf: Timeframe) {
+      const liveEvent = `candle_live_${tf}_${symbol}`;
+      const newEvent = `candle_new_${tf}_${symbol}`;
+
+      const unlistenLive = await listen<Candle>(liveEvent, (event) => {
+        if (!cancelled) updateSymbol(symbol, tf, event.payload);
+      });
+
+      const unlistenNew = await listen<Candle>(newEvent, (event) => {
+        if (!cancelled) updateSymbol(symbol, tf, event.payload);
+      });
+
+      unlisteners.push(unlistenLive, unlistenNew);
+    }
+
+    async function setup() {
       try {
-        console.log("Setting up listeners...");
+        const symbols = ["nq", "es"];
+        const tfs: Timeframe[] = ["15s", "1m", "3m"];
 
-        await registerListener("candle_live_nq", "nq", false);
-        await registerListener("candle_new_nq", "nq", true);
-        await registerListener("candle_live_es", "es", false);
-        await registerListener("candle_new_es", "es", true);
-
-        if (cancelled) return;
-
-        console.log("All listeners setup complete");
+        for (const s of symbols) {
+          for (const tf of tfs) {
+            await register(s, tf);
+          }
+        }
 
         if (!startStreamsPromise) {
-          console.log("Invoking start_all_streams...");
-          startStreamsPromise = invoke("start_all_streams")
-            .then(() => {
-              console.log("start_all_streams invoked successfully");
-            })
-            .catch((error) => {
-              startStreamsPromise = null;
-              throw error;
-            });
-        } else {
-          console.log("start_all_streams already requested");
+          startStreamsPromise = invoke("start_all_streams") as Promise<void>;
         }
 
         await startStreamsPromise;
-      } catch (error) {
-        console.error("Error during setup:", error);
+      } catch (err) {
+        console.error("Stream init error:", err);
       }
     }
 
-    setupListenersAndStart();
+    setup();
 
     return () => {
       cancelled = true;
-
-      for (const unlisten of unlisteners) {
-        try {
-          unlisten();
-        } catch (error) {
-          console.debug("Unlisten error:", error);
-        }
-      }
+      unlisteners.forEach((u) => u());
     };
   }, []);
 
+  // ==================== UI ====================
   return (
-    <div style={{ background: "#0e0e11", height: "100vh", display: "flex", flexDirection: "column", width: "100%" }}>
-      <TopBar layoutType={layoutType} setLayoutType={setLayoutType} />
+    <div className="app-shell">
 
-      <div style={{ flex: 1, overflow: "hidden", width: "100%" }}>
-        <LayoutManager
-          data={data}
+      {/* 🔥 TOOLBAR */}
+      <div className="app-shell__toolbar">
+        <TopBar
           layoutType={layoutType}
-          activeChart={activeChart}
-          setActiveChart={setActiveChart}
-          crosshairTime={crosshairTime}
-          setCrosshairTime={setCrosshairTime}
-          timeRange={timeRange}
-          setTimeRange={setTimeRange}
+          setLayoutType={setLayoutType}
         />
+      </div>
+
+      {/* 🔥 MAIN AREA (SIDEBAR + CHARTS) */}
+      <div style={{ display: "flex", height: "100%" }}>
+
+        {/* 🔥 SIDEBAR */}
+        <Sidebar />
+
+        {/* 🔥 CHART AREA */}
+        <div className="app-shell__viewport" style={{ flex: 1 }}>
+          <LayoutManager
+            data={data}
+            layoutType={layoutType}
+            activeChart={activeChart}
+            setActiveChart={setActiveChart}
+            crosshairTime={crosshairTime}
+            setCrosshairTime={setCrosshairTime}
+            timeRange={timeRange}
+            setTimeRange={setTimeRange}
+            tool={tool} // 🔥 CRITICAL
+          />
+        </div>
+
       </div>
     </div>
   );

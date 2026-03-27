@@ -1,12 +1,7 @@
-import GridLayout from "react-grid-layout";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useState } from "react";
 import ChartPanel from "./ChartPanel";
-import "react-grid-layout/css/styles.css";
-import "react-resizable/css/styles.css";
 
-function defaultSymbolForItem(itemId: string) {
-  return itemId.includes("es") ? "es" : "nq";
-}
+type Timeframe = "15s" | "1m" | "3m";
 
 export default function LayoutManager({
   data,
@@ -17,111 +12,20 @@ export default function LayoutManager({
   setCrosshairTime,
   timeRange,
   setTimeRange,
+  tool, // 🔥 NEW
 }: any) {
+
+  const [vSplit, setVSplit] = useState(0.5);
+  const [hSplit, setHSplit] = useState(0.5);
+
+  // 🔥 PANEL STATE
+  const [panels, setPanels] = useState({
+    A: { symbol: "nq", timeframe: "15s" as Timeframe },
+    B: { symbol: "es", timeframe: "15s" as Timeframe },
+    C: { symbol: "dxy", timeframe: "15s" as Timeframe },
+  });
+
   const [focused, setFocused] = useState<string | null>(null);
-  const [chartConfigs, setChartConfigs] = useState<any>({});
-  const gridContainerRef = useRef<HTMLDivElement>(null);
-  const [gridSize, setGridSize] = useState({ width: 0, height: 0 });
-
-  const layoutConfigs = {
-    "2": {
-      cols: 12,
-      items: [
-        { i: "nq", x: 0, y: 0, w: 6, h: 4 },
-        { i: "es", x: 6, y: 0, w: 6, h: 4 },
-      ],
-    },
-    "4": {
-      cols: 12,
-      items: [
-        { i: "nq", x: 0, y: 0, w: 6, h: 4 },
-        { i: "es", x: 6, y: 0, w: 6, h: 4 },
-        { i: "nq2", x: 0, y: 4, w: 6, h: 4 },
-        { i: "es2", x: 6, y: 4, w: 6, h: 4 },
-      ],
-    },
-    "6": {
-      cols: 12,
-      items: [
-        { i: "nq", x: 0, y: 0, w: 4, h: 4 },
-        { i: "es", x: 4, y: 0, w: 4, h: 4 },
-        { i: "nq2", x: 8, y: 0, w: 4, h: 4 },
-        { i: "es2", x: 0, y: 4, w: 4, h: 4 },
-        { i: "nq3", x: 4, y: 4, w: 4, h: 4 },
-        { i: "es3", x: 8, y: 4, w: 4, h: 4 },
-      ],
-    },
-  };
-
-  const currentConfig = useMemo(() => {
-    return (
-      layoutConfigs[layoutType as keyof typeof layoutConfigs] ||
-      layoutConfigs["2"]
-    );
-  }, [layoutType]);
-
-  const layout = currentConfig.items;
-  const gridMargin: [number, number] = [8, 8];
-  const gridPadding: [number, number] = [8, 8];
-
-  useEffect(() => {
-    if (!gridContainerRef.current) return;
-
-    const container = gridContainerRef.current;
-    const updateSize = () => {
-      setGridSize({
-        width: container.clientWidth,
-        height: container.clientHeight,
-      });
-    };
-
-    updateSize();
-
-    const resizeObserver = new ResizeObserver(updateSize);
-    resizeObserver.observe(container);
-
-    return () => {
-      resizeObserver.disconnect();
-    };
-  }, []);
-
-  const maxGridUnits = useMemo(() => {
-    return layout.reduce(
-      (max, item) => Math.max(max, item.y + item.h),
-      0
-    );
-  }, [layout]);
-
-  const rowHeight = useMemo(() => {
-    if (gridSize.height <= 0 || maxGridUnits === 0) {
-      return 60;
-    }
-
-    const verticalMargins = gridMargin[1] * Math.max(maxGridUnits - 1, 0);
-    const verticalPadding = gridPadding[1] * 2;
-    const availableHeight = Math.max(
-      gridSize.height - verticalMargins - verticalPadding,
-      maxGridUnits
-    );
-
-    return Math.max(40, Math.floor(availableHeight / maxGridUnits));
-  }, [gridSize.height, maxGridUnits]);
-
-  useEffect(() => {
-    setChartConfigs((prev: any) => {
-      const updated = { ...prev };
-      let changed = false;
-
-      layout.forEach((item: any) => {
-        if (!updated[item.i]) {
-          updated[item.i] = defaultSymbolForItem(item.i);
-          changed = true;
-        }
-      });
-
-      return changed ? updated : prev;
-    });
-  }, [layout]);
 
   const sharedProps = {
     activeChart,
@@ -130,34 +34,72 @@ export default function LayoutManager({
     externalTime: crosshairTime,
     onTimeRangeChange: (r: any) => setTimeRange(r),
     externalRange: timeRange,
+    tool, // 🔥 PASS TOOL DOWN
   };
-  const gridSizingProps = {
-    autoSize: false,
-    rowHeight,
-    margin: gridMargin,
-    containerPadding: gridPadding,
-  } as any;
+
+  // ==================== PANEL UPDATE ====================
+  const updatePanel = (key: "A" | "B" | "C", updates: any) => {
+    setPanels((prev) => ({
+      ...prev,
+      [key]: { ...prev[key], ...updates },
+    }));
+  };
+
+  // ==================== RESIZE ====================
+
+  const startVerticalResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+
+    const onMove = (ev: MouseEvent) => {
+      const newSplit = ev.clientX / window.innerWidth;
+      setVSplit(Math.max(0.2, Math.min(0.8, newSplit)));
+    };
+
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  const startHorizontalResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+
+    const onMove = (ev: MouseEvent) => {
+      const newSplit = ev.clientY / window.innerHeight;
+      setHSplit(Math.max(0.2, Math.min(0.8, newSplit)));
+    };
+
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  // ==================== FOCUS MODE ====================
 
   if (focused) {
-    const focusedSymbol = chartConfigs[focused] ?? defaultSymbolForItem(focused);
-    const chartData = data?.[focusedSymbol] || [];
+    const panel = panels[focused as "A" | "B" | "C"];
 
     return (
       <div className="focus-mode">
         <div className="focus-mode__header">
-          <button
-            onClick={() => setFocused(null)}
-            className="focus-mode__back-btn"
-          >
-            ← Back
-          </button>
+          <button onClick={() => setFocused(null)}>← Back</button>
         </div>
 
         <div className="focus-mode__content">
           <ChartPanel
-            symbol={focusedSymbol}
-            data={chartData}
+            symbol={panel.symbol}
+            timeframe={panel.timeframe}
+            data={data[panel.symbol]?.[panel.timeframe] || []}
             onFocus={() => setFocused(null)}
+            onSymbolChange={(s) => updatePanel(focused as any, { symbol: s })}
+            onTimeframeChange={(tf) => updatePanel(focused as any, { timeframe: tf })}
             {...sharedProps}
           />
         </div>
@@ -165,59 +107,150 @@ export default function LayoutManager({
     );
   }
 
-  if (!data) {
+  // ==================== 2 PANEL ====================
+
+  if (layoutType === "2") {
     return (
-      <div
-        style={{ background: "#0e0e11", width: "100%", height: "100vh" }}
-      />
+      <div className="layout-engine">
+
+        <div style={{ position: "absolute", left: 0, top: 0, width: `${vSplit * 100}%`, height: "100%" }}>
+          <ChartPanel
+            symbol={panels.A.symbol}
+            timeframe={panels.A.timeframe}
+            data={data[panels.A.symbol]?.[panels.A.timeframe] || []}
+            onFocus={() => setFocused("A")}
+            onSymbolChange={(s) => updatePanel("A", { symbol: s })}
+            onTimeframeChange={(tf) => updatePanel("A", { timeframe: tf })}
+            {...sharedProps}
+          />
+        </div>
+
+        <div style={{ position: "absolute", left: `${vSplit * 100}%`, top: 0, width: `${(1 - vSplit) * 100}%`, height: "100%" }}>
+          <ChartPanel
+            symbol={panels.B.symbol}
+            timeframe={panels.B.timeframe}
+            data={data[panels.B.symbol]?.[panels.B.timeframe] || []}
+            onFocus={() => setFocused("B")}
+            onSymbolChange={(s) => updatePanel("B", { symbol: s })}
+            onTimeframeChange={(tf) => updatePanel("B", { timeframe: tf })}
+            {...sharedProps}
+          />
+        </div>
+
+        <div
+          onMouseDown={startVerticalResize}
+          style={{
+            position: "absolute",
+            left: `${vSplit * 100}%`,
+            top: 0,
+            width: "6px",
+            height: "100%",
+            cursor: "col-resize",
+            zIndex: 50,
+            transform: "translateX(-3px)",
+          }}
+        />
+      </div>
     );
   }
 
-  return (
-    <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
-      <div
-        ref={gridContainerRef}
-        style={{ flex: 1, overflow: "hidden", width: "100%", minHeight: 0 }}
-      >
-        <GridLayout
-          key={`layout-${layoutType}`}
-          className="layout"
-          layout={layout}
-          width={Math.max(gridSize.width, 1)}
-          draggableHandle=".chart-panel__drag-handle" 
-          {...gridSizingProps}
-        >
-        {layout.map((item) => {
-          const symbol = chartConfigs[item.i] ?? defaultSymbolForItem(item.i);
-          const chartData = data?.[symbol] ?? [];
+  // ==================== 3 PANEL ====================
 
-          return (
-            <div
-              key={item.i}
-              style={{
-                background: "#151518",
-                borderRadius: "8px",
-                border: "1px solid #2a2a2e",
-                overflow: "hidden",
-              }}
-            >
-              <ChartPanel
-                symbol={symbol}
-                data={chartData}
-                onFocus={() => setFocused(item.i)}
-                onSymbolChange={(newSymbol: string) => {
-                  setChartConfigs((prev: any) => ({
-                    ...prev,
-                    [item.i]: newSymbol,
-                  }));
-                }}
-                {...sharedProps}
-              />
-            </div>
-          );
-        })}
-      </GridLayout>
+  if (layoutType === "3") {
+    return (
+      <div className="layout-engine">
+
+        {/* LEFT */}
+        <div style={{ position: "absolute", left: 0, top: 0, width: `${vSplit * 100}%`, height: "100%" }}>
+          <ChartPanel
+            symbol={panels.A.symbol}
+            timeframe={panels.A.timeframe}
+            data={data[panels.A.symbol]?.[panels.A.timeframe] || []}
+            onFocus={() => setFocused("A")}
+            onSymbolChange={(s) => updatePanel("A", { symbol: s })}
+            onTimeframeChange={(tf) => updatePanel("A", { timeframe: tf })}
+            {...sharedProps}
+          />
+        </div>
+
+        {/* TOP RIGHT */}
+        <div style={{ position: "absolute", left: `${vSplit * 100}%`, top: 0, width: `${(1 - vSplit) * 100}%`, height: `${hSplit * 100}%` }}>
+          <ChartPanel
+            symbol={panels.B.symbol}
+            timeframe={panels.B.timeframe}
+            data={data[panels.B.symbol]?.[panels.B.timeframe] || []}
+            onFocus={() => setFocused("B")}
+            onSymbolChange={(s) => updatePanel("B", { symbol: s })}
+            onTimeframeChange={(tf) => updatePanel("B", { timeframe: tf })}
+            {...sharedProps}
+          />
+        </div>
+
+        {/* BOTTOM RIGHT */}
+        <div style={{ position: "absolute", left: `${vSplit * 100}%`, top: `${hSplit * 100}%`, width: `${(1 - vSplit) * 100}%`, height: `${(1 - hSplit) * 100}%` }}>
+          <ChartPanel
+            symbol={panels.C.symbol}
+            timeframe={panels.C.timeframe}
+            data={data[panels.C.symbol]?.[panels.C.timeframe] || []}
+            onFocus={() => setFocused("C")}
+            onSymbolChange={(s) => updatePanel("C", { symbol: s })}
+            onTimeframeChange={(tf) => updatePanel("C", { timeframe: tf })}
+            {...sharedProps}
+          />
+        </div>
+
+        {/* DIVIDERS */}
+        <div onMouseDown={startVerticalResize} style={{ position: "absolute", left: `${vSplit * 100}%`, top: 0, width: "6px", height: "100%", cursor: "col-resize", transform: "translateX(-3px)" }} />
+        <div onMouseDown={startHorizontalResize} style={{ position: "absolute", left: `${vSplit * 100}%`, top: `${hSplit * 100}%`, width: `${(1 - vSplit) * 100}%`, height: "6px", cursor: "row-resize", transform: "translateY(-3px)" }} />
       </div>
-    </div>
-  );
+    );
+  }
+
+  // ==================== 6 PANEL ====================
+
+  if (layoutType === "6") {
+    return (
+      <div className="layout-engine">
+
+        {[0, 1, 2].map((i) => (
+          <div key={`top-${i}`} style={{
+            position: "absolute",
+            left: `${i * 33.33}%`,
+            top: 0,
+            width: "33.33%",
+            height: "50%",
+          }}>
+            <ChartPanel
+              symbol={panels[["A","B","C"][i] as "A"|"B"|"C"].symbol}
+              timeframe={panels[["A","B","C"][i] as "A"|"B"|"C"].timeframe}
+              data={data[panels[["A","B","C"][i] as "A"|"B"|"C"].symbol]?.[panels[["A","B","C"][i] as "A"|"B"|"C"].timeframe] || []}
+              onFocus={() => setFocused(["A","B","C"][i])}
+              {...sharedProps}
+            />
+          </div>
+        ))}
+
+        {[0, 1, 2].map((i) => (
+          <div key={`bottom-${i}`} style={{
+            position: "absolute",
+            left: `${i * 33.33}%`,
+            top: "50%",
+            width: "33.33%",
+            height: "50%",
+          }}>
+            <ChartPanel
+              symbol={panels[["A","B","C"][i] as "A"|"B"|"C"].symbol}
+              timeframe={panels[["A","B","C"][i] as "A"|"B"|"C"].timeframe}
+              data={data[panels[["A","B","C"][i] as "A"|"B"|"C"].symbol]?.[panels[["A","B","C"][i] as "A"|"B"|"C"].timeframe] || []}
+              onFocus={() => setFocused(["A","B","C"][i])}
+              {...sharedProps}
+            />
+          </div>
+        ))}
+
+      </div>
+    );
+  }
+
+  return null;
 }

@@ -1,38 +1,48 @@
 import Chart from "../Chart";
 
+type Timeframe = "15s" | "1m" | "3m";
+
 type Props = {
   symbol: string;
+  timeframe: Timeframe;
   data: any[];
   onFocus: () => void;
   onSymbolChange?: (symbol: string) => void;
+  onTimeframeChange?: (tf: Timeframe) => void;
   activeChart?: string | null;
-  setActiveChart?: (s: string) => void;
+  setActiveChart?: (id: string) => void;
   onCrosshairMove?: (t: number) => void;
-  externalTime?: number | null;
-  onTimeRangeChange?: (r: any, s: string) => void;
+  onTimeRangeChange?: (range: any, chartId: string) => void;
   externalRange?: any;
 };
 
 export default function ChartPanel({
   symbol,
+  timeframe,
   data,
   onFocus,
   onSymbolChange,
+  onTimeframeChange,
   activeChart,
   setActiveChart,
   onCrosshairMove,
-  externalTime,
   onTimeRangeChange,
   externalRange,
 }: Props) {
+
+  // 🔥 UNIQUE CHART IDENTITY (symbol + timeframe)
+  const chartId = `${symbol}_${timeframe}`;
+
   return (
     <div className="chart-panel">
-      {/* Header / drag handle */}
+
+      {/* ================= HEADER ================= */}
       <div className="chart-panel__drag-handle">
+
+        {/* SYMBOL */}
         <select
           value={symbol}
           onChange={(e) => onSymbolChange?.(e.target.value)}
-          onMouseDown={(e) => e.stopPropagation()}
         >
           <option value="nq">NQ</option>
           <option value="es">ES</option>
@@ -41,41 +51,50 @@ export default function ChartPanel({
           <option value="us10y">US10Y</option>
           <option value="gold">GOLD</option>
         </select>
-        <button
-          className="chart-panel__focus"
-          onClick={onFocus}
-          onMouseDown={(event) => event.stopPropagation()}
+
+        {/* TIMEFRAME */}
+        <select
+          value={timeframe}
+          onChange={(e) =>
+            onTimeframeChange?.(e.target.value as Timeframe)
+          }
+        >
+          <option value="15s">15s</option>
+          <option value="1m">1m</option>
+          <option value="3m">3m</option>
+        </select>
+
+        {/* ACTIVE INDICATOR */}
+        <div
           style={{
-            borderColor: activeChart === symbol ? "#4da3ff" : "#2a2a2e",
+            marginLeft: "6px",
+            fontSize: "10px",
+            color: activeChart === symbol ? "#4da3ff" : "#555",
           }}
+        >
+          ●
+        </div>
+
+        {/* FOCUS */}
+        <button
+          className={`chart-panel__focus ${
+            activeChart === symbol ? "chart-panel__focus--active" : ""
+          }`}
+          onClick={onFocus}
         >
           ⤢
         </button>
       </div>
 
-      {/* Chart */}
-      <div
-        className="chart-panel__body"
-        onMouseDown={(e) => {
-          // Prevent grid dragging when clicking on chart area
-          if (e.target !== e.currentTarget) {
-            e.stopPropagation();
-          }
-        }}
-        onTouchStart={(e) => {
-          // Prevent grid dragging on touch interactions with chart
-          if (e.target !== e.currentTarget) {
-            e.stopPropagation();
-          }
-        }}
-      >
+      {/* ================= CHART ================= */}
+      <div className="chart-panel__body">
         <Chart
           symbol={symbol}
           data={data}
+          chartId={chartId}
           activeChart={activeChart}
           setActiveChart={setActiveChart}
           onCrosshairMove={onCrosshairMove}
-          externalTime={externalTime}
           onTimeRangeChange={onTimeRangeChange}
           externalRange={externalRange}
         />

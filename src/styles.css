@@ -1,435 +1,161 @@
-* {
-  box-sizing: border-box;
+:root {
+  --app-bg: #0f1014;
+  --panel-bg: #13151a;
+  --panel-border: #2a2d34;
+  --panel-text: #d4d7de;
+  --panel-muted: #8b9098;
+  --panel-accent: #4da3ff;
+  --toolbar-height: 42px;
+  --panel-radius: 8px;
 }
+
+* { box-sizing: border-box; }
 
 html, body, #root {
-  width: 100%;
   height: 100%;
   margin: 0;
-  padding: 0;
-}
-
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
-    "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  background: #0e0e11;
-  color: #ccc;
   overflow: hidden;
+  background: var(--app-bg);
 }
 
-/* ========== RESPONSIVE GRID LAYOUT ========== */
-.react-grid-layout {
-  background: #0e0e11;
+/* APP SHELL */
+.app-shell {
+  width: 100%;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--app-bg);
+}
+
+.app-shell__toolbar {
+  flex: 0 0 var(--toolbar-height);
+}
+
+.app-shell__viewport {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 🔥 NEW LAYOUT ENGINE */
+.layout-engine {
   position: relative;
   width: 100%;
   height: 100%;
-  padding: 8px;
-  box-sizing: border-box;
+  overflow: hidden;
 }
 
-.react-grid-item {
-  touch-action: manipulation;
+/* divider hover feel */
+.layout-engine div[style*="col-resize"]:hover {
+  background: rgba(255,255,255,0.05);
 }
 
-.react-grid-item.react-grid-placeholder {
-  background: #2a2a2e;
-  opacity: 0.3;
-  border-radius: 8px;
-}
-
-.react-grid-item > .react-resizable-handle {
+.layout-panel {
   position: absolute;
-  width: 20px;
-  height: 20px;
+  padding: 4px;
 }
 
-.react-grid-item > .react-resizable-handle::after {
-  content: "";
+/* RESIZE HANDLES */
+.resize-handle--right {
   position: absolute;
-  right: 3px;
-  bottom: 3px;
-  width: 5px;
-  height: 5px;
-  border-right: 2px solid rgba(255, 255, 255, 0.4);
-  border-bottom: 2px solid rgba(255, 255, 255, 0.4);
+  top: 0;
+  right: -5px;
+  width: 10px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 20;
 }
 
-.react-draggable-dragging {
-  opacity: 0.9;
+.resize-handle--bottom {
+  position: absolute;
+  bottom: -5px;
+  left: 0;
+  width: 100%;
+  height: 10px;
+  cursor: row-resize;
+  z-index: 20;
 }
 
-.react-grid-item.static {
-  background: #151518;
-  border: 1px solid #2a2a2e;
-  border-radius: 8px;
-}
-
-.react-grid-item.text {
-  font-size: 14px;
-}
-
-.react-grid-item.dummy {
-  background: #151518;
-  border: 1px dashed #2a2a2e;
-  border-radius: 8px;
-}
-
-/* ========== CHART PANEL ========== */
+/* CHART PANEL */
 .chart-panel {
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  height: 100%;
-  background: #151518;
-  border: 1px solid #2a2a2e;
-  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  background: var(--panel-bg);
   overflow: hidden;
 }
 
 .chart-panel__drag-handle {
-  padding: 8px 12px;
-  border-bottom: 1px solid #2a2a2e;
+  flex: 0 0 34px;
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  font-size: 12px;
-  color: #ccc;
-  user-select: none;
-  flex-shrink: 0;
-  cursor: move;
-  min-height: 36px;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.chart-panel__drag-handle select {
-  background: #0e0e11;
-  color: #ccc;
-  border: 1px solid #2a2a2e;
-  font-size: 11px;
   padding: 4px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  flex: 1;
-  min-width: 70px;
-  max-width: 100px;
-}
-
-.chart-panel__drag-handle select:hover {
-  border-color: #4da3ff;
-}
-
-.chart-panel__drag-handle select:focus {
-  outline: none;
-  border-color: #4da3ff;
-  box-shadow: 0 0 4px rgba(77, 163, 255, 0.3);
-}
-
-.chart-panel__focus {
-  background: none;
-  border: 1px solid #2a2a2e;
-  color: #888;
-  cursor: pointer;
-  font-size: 14px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  transition: all 0.2s ease;
-  flex-shrink: 0;
-}
-
-.chart-panel__focus:hover {
-  color: #aaa;
-  border-color: #4da3ff;
-}
-
-.chart-panel__focus.active {
-  border-color: #4da3ff;
-  color: #4da3ff;
+  border-bottom: 1px solid var(--panel-border);
 }
 
 .chart-panel__body {
   flex: 1;
+  min-height: 0;
   overflow: hidden;
-  touch-action: manipulation;
 }
 
-/* ========== TOP BAR ========== */
+/* CHART CANVAS */
+.chart-canvas {
+  width: 100%;
+  height: 100%;
+}
+
+/* TOP BAR */
 .top-bar {
-  padding: 8px 12px;
-  border-bottom: 1px solid #2a2a2e;
+  width: 100%;
+  height: var(--toolbar-height);
+  min-height: var(--toolbar-height);
   display: flex;
-  gap: 12px;
   align-items: center;
-  flex-wrap: wrap;
-  background: #0e0e11;
-  min-height: 44px;
+  gap: 12px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--panel-border);
+  background: var(--app-bg);
+  z-index: 100;
 }
 
 .top-bar select {
-  background: #151518;
-  color: #ccc;
-  border: 1px solid #2a2a2e;
-  padding: 6px 12px;
+  background: var(--panel-bg);
+  color: var(--panel-text);
+  border: 1px solid var(--panel-border);
+  padding: 4px 8px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 12px;
-  min-width: 100px;
 }
 
-.top-bar select:hover {
-  border-color: #4da3ff;
+.top-bar__title {
+  color: var(--panel-text);
+  font-size: 14px;
+  font-weight: 600;
 }
 
-.top-bar select:focus {
-  outline: none;
-  border-color: #4da3ff;
-  box-shadow: 0 0 4px rgba(77, 163, 255, 0.3);
-}
-
-/* ========== RESPONSIVE BREAKPOINTS ========== */
-
-/* Large screens (desktop) - 1024px+ */
-@media (min-width: 1024px) {
-  .react-grid-layout {
-    padding: 12px;
+/* 🔥 DRAWING ANIMATIONS */
+@keyframes pop {
+  0% {
+    transform: scale(0.8);
+    opacity: 1;
   }
-
-  .chart-panel__drag-handle {
-    padding: 10px 14px;
-    font-size: 13px;
-  }
-
-  .chart-panel__drag-handle select {
-    font-size: 12px;
-    min-width: 80px;
-    max-width: 120px;
-  }
-
-  .top-bar {
-    padding: 12px 16px;
-    gap: 16px;
-  }
-
-  .top-bar select {
-    padding: 8px 14px;
-    font-size: 13px;
-    min-width: 120px;
+  100% {
+    transform: scale(1.1);
+    opacity: 0;
   }
 }
 
-/* Tablets (768px - 1023px) */
-@media (max-width: 1023px) {
-  .react-grid-layout {
-    padding: 8px;
+@keyframes pulse {
+  0% {
+    transform: scale(1);
+    opacity: 1;
   }
-
-  .chart-panel__drag-handle {
-    padding: 6px 10px;
-    font-size: 11px;
-  }
-
-  .chart-panel__drag-handle select {
-    font-size: 10px;
-    padding: 3px 6px;
-    min-width: 60px;
-    max-width: 90px;
-  }
-
-  .chart-panel__focus {
-    padding: 3px 6px;
-    font-size: 12px;
-  }
-
-  .top-bar {
-    padding: 8px 10px;
-    gap: 10px;
-  }
-
-  .top-bar select {
-    padding: 5px 10px;
-    font-size: 11px;
-    min-width: 90px;
-  }
-}
-
-/* Mobile (max 767px) */
-@media (max-width: 767px) {
-  .react-grid-layout {
-    padding: 4px;
-  }
-
-  .chart-panel__drag-handle {
-    padding: 4px 8px;
-    font-size: 10px;
-    min-height: 32px;
-  }
-
-  .chart-panel__drag-handle select {
-    font-size: 9px;
-    padding: 2px 4px;
-    min-width: 50px;
-    max-width: 80px;
-    flex: 0 1 auto;
-  }
-
-  .chart-panel__focus {
-    padding: 2px 4px;
-    font-size: 11px;
-  }
-
-  .top-bar {
-    padding: 6px 8px;
-    gap: 8px;
-    min-height: 40px;
-  }
-
-  .top-bar select {
-    padding: 4px 8px;
-    font-size: 10px;
-    min-width: 80px;
-    flex: 1;
-    min-width: calc(50% - 4px);
-  }
-
-  /* Stack layout selectors on mobile */
-  .top-bar select:nth-of-type(2) {
-    order: 3;
-    flex-basis: 100%;
-  }
-}
-
-/* Extra small screens (max 480px) */
-@media (max-width: 480px) {
-  .react-grid-layout {
-    padding: 2px;
-  }
-
-  .chart-panel__drag-handle {
-    padding: 3px 6px;
-    font-size: 9px;
-    gap: 2px;
-  }
-
-  .chart-panel__drag-handle select {
-    font-size: 8px;
-    padding: 1px 3px;
-    min-width: 45px;
-  }
-
-  .chart-panel__focus {
-    padding: 1px 3px;
-    font-size: 9px;
-  }
-
-  .top-bar {
-    padding: 4px 6px;
-    gap: 4px;
-  }
-
-  .top-bar select {
-    padding: 3px 6px;
-    font-size: 9px;
-    min-width: 70px;
-  }
-
-  /* Single column on very small screens */
-  .react-grid-item {
-    width: 100% !important;
-  }
-}
-
-/* ========== FOCUS MODE ========== */
-.focus-mode {
-  width: 100vw;
-  height: 100vh;
-  background: #0e0e11;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  position: fixed;
-  top: 0;
-  left: 0;
-  z-index: 999;
-}
-
-.focus-mode__header {
-  padding: 12px 16px;
-  border-bottom: 1px solid #2a2a2e;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-}
-
-.focus-mode__back-btn {
-  background: none;
-  border: 1px solid #2a2a2e;
-  color: #ccc;
-  padding: 6px 12px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 12px;
-  transition: all 0.2s ease;
-}
-
-.focus-mode__back-btn:hover {
-  border-color: #4da3ff;
-  color: #4da3ff;
-}
-
-.focus-mode__content {
-  flex: 1;
-  overflow: hidden;
-  position: relative;
-}
-
-@media (max-width: 768px) {
-  .focus-mode__header {
-    padding: 8px 12px;
-  }
-
-  .focus-mode__back-btn {
-    padding: 4px 8px;
-    font-size: 11px;
-  }
-}
-
-/* ========== SCROLLBAR STYLING ========== */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: #0e0e11;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #2a2a2e;
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #4a4a4e;
-}
-
-/* ========== TRANSITIONS ========== */
-* {
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.react-grid-item {
-  will-change: transform;
-}
-
-/* ========== ACCESSIBILITY ========== */
-@media (prefers-reduced-motion: reduce) {
-  * {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+  100% {
+    transform: scale(1.05);
+    opacity: 0.5;
   }
 }
