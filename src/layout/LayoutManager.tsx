@@ -1,5 +1,5 @@
 import GridLayout from "react-grid-layout";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ChartPanel from "./ChartPanel";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
@@ -20,17 +20,8 @@ export default function LayoutManager({
 }: any) {
   const [focused, setFocused] = useState<string | null>(null);
   const [chartConfigs, setChartConfigs] = useState<any>({});
-  const [windowWidth, setWindowWidth] = useState(window.innerWidth);
-
-  // Handle window resize
-  useEffect(() => {
-    const handleResize = () => {
-      setWindowWidth(window.innerWidth);
-    };
-    
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
+  const gridContainerRef = useRef<HTMLDivElement>(null);
+  const [gridSize, setGridSize] = useState({ width: 0, height: 0 });
 
   const layoutConfigs = {
     "2": {
@@ -70,6 +61,51 @@ export default function LayoutManager({
   }, [layoutType]);
 
   const layout = currentConfig.items;
+  const gridMargin: [number, number] = [8, 8];
+  const gridPadding: [number, number] = [8, 8];
+
+  useEffect(() => {
+    if (!gridContainerRef.current) return;
+
+    const container = gridContainerRef.current;
+    const updateSize = () => {
+      setGridSize({
+        width: container.clientWidth,
+        height: container.clientHeight,
+      });
+    };
+
+    updateSize();
+
+    const resizeObserver = new ResizeObserver(updateSize);
+    resizeObserver.observe(container);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, []);
+
+  const maxGridUnits = useMemo(() => {
+    return layout.reduce(
+      (max, item) => Math.max(max, item.y + item.h),
+      0
+    );
+  }, [layout]);
+
+  const rowHeight = useMemo(() => {
+    if (gridSize.height <= 0 || maxGridUnits === 0) {
+      return 60;
+    }
+
+    const verticalMargins = gridMargin[1] * Math.max(maxGridUnits - 1, 0);
+    const verticalPadding = gridPadding[1] * 2;
+    const availableHeight = Math.max(
+      gridSize.height - verticalMargins - verticalPadding,
+      maxGridUnits
+    );
+
+    return Math.max(40, Math.floor(availableHeight / maxGridUnits));
+  }, [gridSize.height, maxGridUnits]);
 
   useEffect(() => {
     setChartConfigs((prev: any) => {
@@ -95,6 +131,12 @@ export default function LayoutManager({
     onTimeRangeChange: (r: any) => setTimeRange(r),
     externalRange: timeRange,
   };
+  const gridSizingProps = {
+    autoSize: false,
+    rowHeight,
+    margin: gridMargin,
+    containerPadding: gridPadding,
+  } as any;
 
   if (focused) {
     const focusedSymbol = chartConfigs[focused] ?? defaultSymbolForItem(focused);
@@ -133,13 +175,17 @@ export default function LayoutManager({
 
   return (
     <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
-      <div style={{ flex: 1, overflow: "hidden", width: "100%", minHeight: 0 }}>
+      <div
+        ref={gridContainerRef}
+        style={{ flex: 1, overflow: "hidden", width: "100%", minHeight: 0 }}
+      >
         <GridLayout
           key={`layout-${layoutType}`}
           className="layout"
           layout={layout}
-          width={Math.max(windowWidth - 20, 1)}
-          rowHeight={window.innerHeight / 2.5}
+          width={Math.max(gridSize.width, 1)}
+          draggableHandle=".chart-panel__drag-handle" 
+          {...gridSizingProps}
         >
         {layout.map((item) => {
           const symbol = chartConfigs[item.i] ?? defaultSymbolForItem(item.i);
