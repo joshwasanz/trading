@@ -11,9 +11,11 @@ import {
 } from "lightweight-charts";
 import { useToolStore } from "./store/useToolStore";
 import {
+  DEFAULT_TRENDLINE_EXTENSION,
   createDrawingId,
   type ChartDrawings,
   type DrawingSelection,
+  type LineExtension,
   type Point,
   type Rectangle,
   type Trendline,
@@ -40,7 +42,10 @@ type Props = {
   drawings: ChartDrawings;
   onAddTrendline: (chartId: string, line: Trendline) => void;
   onAddRectangle: (chartId: string, rect: Rectangle) => void;
+  onDeleteDrawing?: (id: string) => void;
+  onUpdateDrawing?: (selection: DrawingSelection, points: { start: Point; end: Point }) => void;
   tool?: string | null;
+  magnet?: boolean;
 };
 
 type ScreenPoint = {
@@ -48,16 +53,23 @@ type ScreenPoint = {
   y: number;
 };
 
-function getExtendedLine(
+type DragMode = "move" | "resize-start" | "resize-end";
+
+type DragTarget = {
+  selection: DrawingSelection;
+  dragMode: DragMode;
+};
+
+function getLineBoundaryIntersections(
   start: ScreenPoint,
   end: ScreenPoint,
   width: number,
   height: number
-): { start: ScreenPoint; end: ScreenPoint } | null {
+): Array<{ point: ScreenPoint; t: number }> {
   const dx = end.x - start.x;
   const dy = end.y - start.y;
 
-  if (dx === 0 && dy === 0) return null;
+  if (dx === 0 && dy === 0) return [];
 
   const intersections: Array<{ point: ScreenPoint; t: number }> = [];
 
@@ -90,11 +102,41 @@ function getExtendedLine(
     if (bottomX >= 0 && bottomX <= width) pushIntersection(bottomX, height, bottomT);
   }
 
-  if (intersections.length < 2) return null;
+  return intersections.sort((a, b) => a.t - b.t);
+}
 
-  intersections.sort((a, b) => a.t - b.t);
+function getTrendlineSegment(
+  start: ScreenPoint,
+  end: ScreenPoint,
+  extend: LineExtension,
+  width: number,
+  height: number
+): { start: ScreenPoint; end: ScreenPoint } | null {
+  if (extend === "none") {
+    return { start, end };
+  }
+
+  const [leftAnchor, rightAnchor] = start.x <= end.x ? [start, end] : [end, start];
+  const intersections = getLineBoundaryIntersections(
+    leftAnchor,
+    rightAnchor,
+    width,
+    height
+  );
+
+  if (intersections.length < 2) {
+    return { start: leftAnchor, end: rightAnchor };
+  }
+
+  if (extend === "both") {
+    return {
+      start: intersections[0].point,
+      end: intersections[intersections.length - 1].point,
+    };
+  }
+
   return {
-    start: intersections[0].point,
+    start: leftAnchor,
     end: intersections[intersections.length - 1].point,
   };
 }
@@ -146,6 +188,24 @@ function pointHitsRectangle(
   return point.x >= left && point.x <= right && point.y >= top && point.y <= bottom;
 }
 
+function drawSelectionHandle(
+  ctx: CanvasRenderingContext2D,
+  point: ScreenPoint,
+  radius: number
+) {
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function isNearPoint(
+  point: ScreenPoint,
+  target: ScreenPoint,
+  threshold: number
+): boolean {
+  return Math.hypot(point.x - target.x, point.y - target.y) <= threshold;
+}
+
 export default function Chart({
   data,
   onCrosshairMove,
@@ -159,7 +219,10 @@ export default function Chart({
   drawings,
   onAddTrendline,
   onAddRectangle,
+  onDeleteDrawing,
+  onUpdateDrawing,
   tool,
+  magnet = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -171,13 +234,24 @@ export default function Chart({
   const hasInitialData = useRef(false);
   const activeChartRef = useRef<string | null>(null);
   const toolRef = useRef(tool);
+  const magnetRef = useRef(magnet);
+  const dataRef = useRef(data);
   const drawingsRef = useRef(drawings);
   const selectedDrawingRef = useRef<DrawingSelection | null>(null);
   const onCrosshairMoveRef = useRef(onCrosshairMove);
   const onTimeRangeChangeRef = useRef(onTimeRangeChange);
+  const onDeleteDrawingRef = useRef(onDeleteDrawing);
+  const onUpdateDrawingRef = useRef(onUpdateDrawing);
 
   const drawStartRef = useRef<Point | null>(null);
   const drawPreviewRef = useRef<Point | null>(null);
+  const isDraggingRef = useRef(false);
+  const dragStartPointRef = useRef<Point | null>(null);
+  const dragStartScreenRef = useRef<ScreenPoint | null>(null);
+  const dragInitialRef = useRef<{ start: Point; end: Point } | null>(null);
+  const dragModeRef = useRef<DragMode>("move");
+  const dragMovedRef = useRef(false);
+  const suppressClickRef = useRef(false);
 
   const setTool = useToolStore((state) => state.setTool);
   const [drawingStep, setDrawingStep] = useState<"none" | "started">("none");
@@ -186,6 +260,14 @@ export default function Chart({
   useEffect(() => {
     toolRef.current = tool;
   }, [tool]);
+
+  useEffect(() => {
+    magnetRef.current = magnet;
+  }, [magnet]);
+
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
 
   useEffect(() => {
     activeChartRef.current = activeChart ?? null;
@@ -206,6 +288,14 @@ export default function Chart({
   useEffect(() => {
     onTimeRangeChangeRef.current = onTimeRangeChange;
   }, [onTimeRangeChange]);
+
+  useEffect(() => {
+    onDeleteDrawingRef.current = onDeleteDrawing;
+  }, [onDeleteDrawing]);
+
+  useEffect(() => {
+    onUpdateDrawingRef.current = onUpdateDrawing;
+  }, [onUpdateDrawing]);
 
   const pointToScreen = useCallback((point: Point): ScreenPoint | null => {
     const chart = chartRef.current;
@@ -236,7 +326,13 @@ export default function Chart({
         const end = pointToScreen(line.end);
         if (!start || !end) continue;
 
-        const segment = getExtendedLine(start, end, canvas.width, canvas.height);
+        const segment = getTrendlineSegment(
+          start,
+          end,
+          line.extend,
+          canvas.width,
+          canvas.height
+        );
         const targetStart = segment?.start ?? start;
         const targetEnd = segment?.end ?? end;
 
@@ -261,6 +357,181 @@ export default function Chart({
     [pointToScreen]
   );
 
+  const getDrawingBySelection = useCallback((selection: DrawingSelection | null) => {
+    if (!selection) return null;
+
+    return selection.type === "trendline"
+      ? drawingsRef.current.trendlines.find((line) => line.id === selection.id) ?? null
+      : drawingsRef.current.rectangles.find((rect) => rect.id === selection.id) ?? null;
+  }, []);
+
+  const hitTestSelectedHandles = useCallback(
+    (screenPoint: ScreenPoint): DragTarget | null => {
+      const selection = selectedDrawingRef.current;
+      const drawing = getDrawingBySelection(selection);
+      if (!selection || !drawing) return null;
+
+      const threshold = 6 * (window.devicePixelRatio || 1);
+      const start = pointToScreen(drawing.start);
+      const end = pointToScreen(drawing.end);
+      if (!start || !end) return null;
+
+      if (isNearPoint(screenPoint, start, threshold)) {
+        return { selection, dragMode: "resize-start" };
+      }
+
+      if (isNearPoint(screenPoint, end, threshold)) {
+        return { selection, dragMode: "resize-end" };
+      }
+
+      return null;
+    },
+    [getDrawingBySelection, pointToScreen]
+  );
+
+  const hitTestDragTarget = useCallback(
+    (screenPoint: ScreenPoint): DragTarget | null => {
+      const handleHit = hitTestSelectedHandles(screenPoint);
+      if (handleHit) return handleHit;
+
+      const drawingHit = hitTestDrawings(screenPoint);
+      if (!drawingHit) return null;
+
+      return { selection: drawingHit, dragMode: "move" };
+    },
+    [hitTestDrawings, hitTestSelectedHandles]
+  );
+
+  const pointFromCoordinates = useCallback((x: number, y: number): Point | null => {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    if (!chart || !series) return null;
+
+    try {
+      const time = chart.timeScale().coordinateToTime(x);
+      const price = series.coordinateToPrice(y);
+
+      if (typeof time !== "number" || price === null) return null;
+
+      return { time: time as UTCTimestamp, price };
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const getRawPointFromParam = useCallback((param: MouseEventParams<Time>): Point | null => {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    if (!chart || !series || !param.point) return null;
+
+    try {
+      const timeFromEvent = param.time;
+      const timeFromCoord = chart.timeScale().coordinateToTime(param.point.x);
+      const price = series.coordinateToPrice(param.point.y);
+
+      const time =
+        typeof timeFromEvent === "number"
+          ? timeFromEvent
+          : typeof timeFromCoord === "number"
+            ? timeFromCoord
+            : null;
+
+      if (time === null || price === null) return null;
+
+      return { time: time as UTCTimestamp, price };
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const getNearestCandle = useCallback((param: MouseEventParams<Time>): Candle | null => {
+    if (typeof param.logical !== "number") return null;
+
+    const index = Math.round(param.logical);
+    const candles = dataRef.current;
+    if (index < 0 || index >= candles.length) return null;
+
+    return candles[index] ?? null;
+  }, []);
+
+  const applyMagnet = useCallback(
+    (param: MouseEventParams<Time>, rawPoint: Point): Point => {
+      if (!magnetRef.current) {
+        return rawPoint;
+      }
+
+      const candle = getNearestCandle(param);
+      if (!candle) return rawPoint;
+
+      const levels = [candle.open, candle.high, candle.low, candle.close];
+      let closest = levels[0];
+
+      for (const level of levels) {
+        if (Math.abs(level - rawPoint.price) < Math.abs(closest - rawPoint.price)) {
+          closest = level;
+        }
+      }
+
+      return {
+        time: candle.time as UTCTimestamp,
+        price: closest,
+      };
+    },
+    [getNearestCandle]
+  );
+
+  const getSnappedPointFromParam = useCallback(
+    (param: MouseEventParams<Time>): Point | null => {
+      const rawPoint = getRawPointFromParam(param);
+      if (!rawPoint) return null;
+
+      return applyMagnet(param, rawPoint);
+    },
+    [applyMagnet, getRawPointFromParam]
+  );
+
+  const setContainerCursor = useCallback((cursor: string) => {
+    if (containerRef.current) {
+      containerRef.current.style.cursor = cursor;
+    }
+  }, []);
+
+  const getDefaultCursor = useCallback(() => {
+    return toolRef.current === "trendline" || toolRef.current === "rectangle"
+      ? "crosshair"
+      : "";
+  }, []);
+
+  const setPressedNavigationEnabled = useCallback((enabled: boolean) => {
+    if (!chartRef.current) return;
+
+    chartRef.current.applyOptions({
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: enabled,
+      },
+      handleScale: {
+        mouseWheel: true,
+        pinch: true,
+        axisPressedMouseMove: {
+          time: enabled,
+          price: enabled,
+        },
+      },
+    });
+  }, []);
+
+  const resetDragState = useCallback(() => {
+    isDraggingRef.current = false;
+    dragStartPointRef.current = null;
+    dragStartScreenRef.current = null;
+    dragInitialRef.current = null;
+    dragModeRef.current = "move";
+    dragMovedRef.current = false;
+    setPressedNavigationEnabled(true);
+    setContainerCursor(getDefaultCursor());
+  }, [getDefaultCursor, setContainerCursor, setPressedNavigationEnabled]);
+
   const drawOverlay = useCallback(() => {
     const canvas = overlayRef.current;
     if (!canvas) return;
@@ -279,11 +550,18 @@ export default function Chart({
       const end = pointToScreen(line.end);
       if (!start || !end) continue;
 
-      const extended = getExtendedLine(start, end, canvas.width, canvas.height);
+      const extended = getTrendlineSegment(
+        start,
+        end,
+        line.extend,
+        canvas.width,
+        canvas.height
+      );
       if (!extended) continue;
 
       const isSelected =
-        selectedDrawingRef.current?.type === "trendline" && selectedDrawingRef.current.id === line.id;
+        selectedDrawingRef.current?.type === "trendline" &&
+        selectedDrawingRef.current.id === line.id;
 
       ctx.strokeStyle = isSelected ? "#ffffff" : "#4da3ff";
       ctx.lineWidth = (isSelected ? 3 : 2) * dpr;
@@ -291,13 +569,25 @@ export default function Chart({
       ctx.moveTo(extended.start.x, extended.start.y);
       ctx.lineTo(extended.end.x, extended.end.y);
       ctx.stroke();
+
+      if (isSelected) {
+        ctx.fillStyle = "#ffffff";
+        drawSelectionHandle(ctx, start, 4 * dpr);
+        drawSelectionHandle(ctx, end, 4 * dpr);
+      }
     }
 
     if (toolRef.current === "trendline" && drawStartRef.current && drawPreviewRef.current) {
       const start = pointToScreen(drawStartRef.current);
       const end = pointToScreen(drawPreviewRef.current);
       if (start && end) {
-        const extended = getExtendedLine(start, end, canvas.width, canvas.height);
+        const extended = getTrendlineSegment(
+          start,
+          end,
+          DEFAULT_TRENDLINE_EXTENSION,
+          canvas.width,
+          canvas.height
+        );
         if (extended) {
           ctx.strokeStyle = "#4da3ff";
           ctx.lineWidth = 2 * dpr;
@@ -323,7 +613,8 @@ export default function Chart({
       if (!start || !end) continue;
 
       const isSelected =
-        selectedDrawingRef.current?.type === "rectangle" && selectedDrawingRef.current.id === rect.id;
+        selectedDrawingRef.current?.type === "rectangle" &&
+        selectedDrawingRef.current.id === rect.id;
       const x = Math.min(start.x, end.x);
       const y = Math.min(start.y, end.y);
       const width = Math.abs(end.x - start.x);
@@ -336,6 +627,12 @@ export default function Chart({
       ctx.rect(x, y, width, height);
       ctx.fill();
       ctx.stroke();
+
+      if (isSelected) {
+        ctx.fillStyle = "#ffffff";
+        drawSelectionHandle(ctx, start, 4 * dpr);
+        drawSelectionHandle(ctx, end, 4 * dpr);
+      }
     }
 
     if (toolRef.current === "rectangle" && drawStartRef.current && drawPreviewRef.current) {
@@ -402,10 +699,24 @@ export default function Chart({
 
   useEffect(() => {
     hasInitialData.current = false;
+    resetDragState();
     drawStartRef.current = null;
     drawPreviewRef.current = null;
     setDrawingStep("none");
-  }, [seriesKey]);
+  }, [seriesKey, resetDragState]);
+
+  useEffect(() => {
+    if (activeChart && activeChart !== chartId && selectedDrawingRef.current) {
+      resetDragState();
+      setSelectedDrawing(null);
+    }
+  }, [activeChart, chartId, resetDragState]);
+
+  useEffect(() => {
+    if (!selectedDrawing && isDraggingRef.current) {
+      resetDragState();
+    }
+  }, [selectedDrawing, resetDragState]);
 
   useEffect(() => {
     if (!selectedDrawing) return;
@@ -425,10 +736,75 @@ export default function Chart({
   }, [selectedDrawing, scheduleOverlayDraw]);
 
   useEffect(() => {
+    if (!isDraggingRef.current) {
+      setContainerCursor(getDefaultCursor());
+    }
+  }, [getDefaultCursor, setContainerCursor, tool]);
+
+  useEffect(() => {
+    const handleMouseUp = () => {
+      if (!isDraggingRef.current) return;
+
+      if (dragMovedRef.current) {
+        suppressClickRef.current = true;
+      }
+
+      resetDragState();
+    };
+
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => window.removeEventListener("mouseup", handleMouseUp);
+  }, [resetDragState]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Delete") return;
+      if (activeChartRef.current !== chartId) return;
+
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (drawStartRef.current) {
+        drawStartRef.current = null;
+        drawPreviewRef.current = null;
+        setDrawingStep("none");
+        scheduleOverlayDraw();
+        event.preventDefault();
+        return;
+      }
+
+      const currentSelection = selectedDrawingRef.current;
+      if (!currentSelection) return;
+
+      onDeleteDrawingRef.current?.(currentSelection.id);
+      setSelectedDrawing(null);
+      event.preventDefault();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [chartId, scheduleOverlayDraw]);
+
+  useEffect(() => {
+    return () => {
+      resetDragState();
+    };
+  }, [resetDragState]);
+
+  useEffect(() => {
     if (!containerRef.current) return;
     const container = containerRef.current;
 
     hasInitialData.current = false;
+    resetDragState();
     drawStartRef.current = null;
     drawPreviewRef.current = null;
     setDrawingStep("none");
@@ -461,7 +837,42 @@ export default function Chart({
     chartRef.current = chart;
     seriesRef.current = series;
 
-    const handleMouseDown = () => setActiveChart?.(chartId);
+    const handleMouseDown = (event: MouseEvent) => {
+      setActiveChart?.(chartId);
+      activeChartRef.current = chartId;
+
+      const bounds = container.getBoundingClientRect();
+      const localX = event.clientX - bounds.left;
+      const localY = event.clientY - bounds.top;
+      const point = pointFromCoordinates(localX, localY);
+      if (!point) return;
+
+      const dpr = window.devicePixelRatio || 1;
+      const dragTarget = hitTestDragTarget({ x: localX * dpr, y: localY * dpr });
+      if (!dragTarget) {
+        return;
+      }
+
+      const drawing = getDrawingBySelection(dragTarget.selection);
+      if (!drawing) return;
+
+      selectedDrawingRef.current = dragTarget.selection;
+      setSelectedDrawing(dragTarget.selection);
+      isDraggingRef.current = true;
+      dragStartPointRef.current = point;
+      dragStartScreenRef.current = { x: localX * dpr, y: localY * dpr };
+      dragInitialRef.current = {
+        start: { ...drawing.start },
+        end: { ...drawing.end },
+      };
+      dragModeRef.current = dragTarget.dragMode;
+      dragMovedRef.current = false;
+      setPressedNavigationEnabled(false);
+      setContainerCursor(
+        dragTarget.dragMode === "move" ? "grabbing" : "pointer"
+      );
+      event.preventDefault();
+    };
     container.addEventListener("mousedown", handleMouseDown);
 
     window.requestAnimationFrame(() => {
@@ -475,28 +886,11 @@ export default function Chart({
     });
     resizeObserver.observe(container);
 
-    const getPoint = (param: MouseEventParams<Time>): Point | null => {
-      if (!param.point) return null;
-
-      const timeFromEvent = param.time;
-      const timeFromCoord = chart.timeScale().coordinateToTime(param.point.x);
-      const price = series.coordinateToPrice(param.point.y);
-
-      const time =
-        typeof timeFromEvent === "number"
-          ? timeFromEvent
-          : typeof timeFromCoord === "number"
-            ? timeFromCoord
-            : null;
-
-      if (time === null || price === null) return null;
-
-      return { time: time as UTCTimestamp, price };
-    };
-
     const handleVisibleRangeChange = (range: any) => {
       scheduleOverlayDraw();
-      if (!range || activeChartRef.current !== chartId) return;
+      if (!range || activeChartRef.current !== chartId) {
+        return;
+      }
 
       if (rangeTimeoutRef.current !== null) {
         window.clearTimeout(rangeTimeoutRef.current);
@@ -510,17 +904,94 @@ export default function Chart({
 
     const handleCrosshairMove = (param: MouseEventParams<Time>) => {
       try {
-        const point = getPoint(param);
-        if (point) {
-          onCrosshairMoveRef.current?.(point.time as number);
+        const rawPoint = getRawPointFromParam(param);
+        const snappedPoint = getSnappedPointFromParam(param);
+        if (rawPoint) {
+          onCrosshairMoveRef.current?.(rawPoint.time as number);
+        }
+
+        if (
+          isDraggingRef.current &&
+          dragStartPointRef.current &&
+          dragStartScreenRef.current &&
+          dragInitialRef.current &&
+          selectedDrawingRef.current &&
+          param.point &&
+          rawPoint
+        ) {
+          const dpr = window.devicePixelRatio || 1;
+          const currentScreen = {
+            x: param.point.x * dpr,
+            y: param.point.y * dpr,
+          };
+          const movedEnough =
+            Math.hypot(
+              currentScreen.x - dragStartScreenRef.current.x,
+              currentScreen.y - dragStartScreenRef.current.y
+            ) >= 3 * dpr;
+
+          if (!movedEnough) {
+            return;
+          }
+
+          dragMovedRef.current = true;
+
+          const initial = dragInitialRef.current;
+          const selection = selectedDrawingRef.current;
+
+          if (dragModeRef.current === "move") {
+            const dx = rawPoint.time - dragStartPointRef.current.time;
+            const dy = rawPoint.price - dragStartPointRef.current.price;
+            onUpdateDrawingRef.current?.(selection, {
+              start: {
+                time: (initial.start.time + dx) as UTCTimestamp,
+                price: initial.start.price + dy,
+              },
+              end: {
+                time: (initial.end.time + dx) as UTCTimestamp,
+                price: initial.end.price + dy,
+              },
+            });
+          } else if (dragModeRef.current === "resize-start" && snappedPoint) {
+            onUpdateDrawingRef.current?.(selection, {
+              start: snappedPoint,
+              end: initial.end,
+            });
+          } else if (snappedPoint) {
+            onUpdateDrawingRef.current?.(selection, {
+              start: initial.start,
+              end: snappedPoint,
+            });
+          }
+          return;
+        }
+
+        if (!isDraggingRef.current) {
+          if (!param.point) {
+            setContainerCursor(getDefaultCursor());
+          } else {
+            const dpr = window.devicePixelRatio || 1;
+            const screenPoint = {
+              x: param.point.x * dpr,
+              y: param.point.y * dpr,
+            };
+
+            if (hitTestSelectedHandles(screenPoint)) {
+              setContainerCursor("pointer");
+            } else if (hitTestDrawings(screenPoint)) {
+              setContainerCursor("grab");
+            } else {
+              setContainerCursor(getDefaultCursor());
+            }
+          }
         }
 
         if (
           (toolRef.current === "trendline" || toolRef.current === "rectangle") &&
           drawStartRef.current &&
-          point
+          snappedPoint
         ) {
-          drawPreviewRef.current = point;
+          drawPreviewRef.current = snappedPoint;
           scheduleOverlayDraw();
         }
       } catch (error) {
@@ -531,8 +1002,12 @@ export default function Chart({
 
     const handleClick = (param: MouseEventParams<Time>) => {
       try {
-        const point = getPoint(param);
-        if (!point || !param.point) return;
+        if (suppressClickRef.current) {
+          suppressClickRef.current = false;
+          return;
+        }
+
+        if (!param.point) return;
 
         const dpr = window.devicePixelRatio || 1;
         const screenPoint = {
@@ -560,6 +1035,9 @@ export default function Chart({
           return;
         }
 
+        const point = getSnappedPointFromParam(param);
+        if (!point) return;
+
         if (!drawStartRef.current) {
           drawStartRef.current = point;
           drawPreviewRef.current = point;
@@ -577,6 +1055,7 @@ export default function Chart({
             id: createDrawingId("trendline"),
             start,
             end: point,
+            extend: DEFAULT_TRENDLINE_EXTENSION,
           };
           onAddTrendline(chartId, line);
           setSelectedDrawing({ type: "trendline", id: line.id });
@@ -621,17 +1100,28 @@ export default function Chart({
 
       resizeObserver.disconnect();
       chart.remove();
+      resetDragState();
 
       if (chartRef.current === chart) chartRef.current = null;
       if (seriesRef.current === series) seriesRef.current = null;
     };
   }, [
     chartId,
+    getDefaultCursor,
+    getDrawingBySelection,
+    getRawPointFromParam,
+    getSnappedPointFromParam,
+    hitTestDragTarget,
     hitTestDrawings,
+    hitTestSelectedHandles,
     onAddRectangle,
     onAddTrendline,
+    pointFromCoordinates,
+    resetDragState,
     scheduleOverlayDraw,
     setActiveChart,
+    setContainerCursor,
+    setPressedNavigationEnabled,
     setTool,
     syncOverlaySize,
   ]);

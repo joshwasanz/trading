@@ -99,6 +99,7 @@ function AppInner() {
   const [layoutType, setLayoutType] = useState("2");
 
   const tool = useToolStore((state) => state.tool);
+  const magnet = useToolStore((state) => state.magnet);
 
   useEffect(() => {
     try {
@@ -194,6 +195,7 @@ function AppInner() {
             rangeSource={rangeSource}
             setRangeSource={setRangeSource}
             tool={tool}
+            magnet={magnet}
           />
         </div>
       </div>

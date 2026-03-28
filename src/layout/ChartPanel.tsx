@@ -1,5 +1,5 @@
 import Chart from "../Chart";
-import type { ChartDrawings, Rectangle, Trendline } from "../types/drawings";
+import type { ChartDrawings, DrawingSelection, Point, Rectangle, Trendline } from "../types/drawings";
 
 type Timeframe = "15s" | "1m" | "3m";
 
@@ -11,6 +11,8 @@ type Props = {
   drawings: ChartDrawings;
   onAddTrendline: (chartId: string, line: Trendline) => void;
   onAddRectangle: (chartId: string, rect: Rectangle) => void;
+  onDeleteDrawing?: (id: string) => void;
+  onUpdateDrawing?: (selection: DrawingSelection, points: { start: Point; end: Point }) => void;
   onFocus: () => void;
   onSymbolChange?: (symbol: string) => void;
   onTimeframeChange?: (tf: Timeframe) => void;
@@ -21,6 +23,7 @@ type Props = {
   externalRange?: any;
   rangeSource?: string | null;
   tool?: string | null;
+  magnet?: boolean;
 };
 
 export default function ChartPanel({
@@ -31,6 +34,8 @@ export default function ChartPanel({
   drawings,
   onAddTrendline,
   onAddRectangle,
+  onDeleteDrawing,
+  onUpdateDrawing,
   onFocus,
   onSymbolChange,
   onTimeframeChange,
@@ -41,6 +46,7 @@ export default function ChartPanel({
   externalRange,
   rangeSource,
   tool,
+  magnet,
 }: Props) {
   const chartId = panelId;
 
@@ -82,6 +88,8 @@ export default function ChartPanel({
           drawings={drawings}
           onAddTrendline={onAddTrendline}
           onAddRectangle={onAddRectangle}
+          onDeleteDrawing={onDeleteDrawing}
+          onUpdateDrawing={onUpdateDrawing}
           activeChart={activeChart}
           setActiveChart={setActiveChart}
           onCrosshairMove={onCrosshairMove}
@@ -89,6 +97,7 @@ export default function ChartPanel({
           externalRange={externalRange}
           rangeSource={rangeSource}
           tool={tool}
+          magnet={magnet}
         />
       </div>
     </div>

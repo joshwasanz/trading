@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import ChartPanel from "./ChartPanel";
 import {
+  DEFAULT_TRENDLINE_EXTENSION,
   EMPTY_CHART_DRAWINGS,
   type ChartDrawings,
+  type DrawingSelection,
   type DrawingsState,
+  type LineExtension,
   type Point,
   type Rectangle,
   type Trendline,
@@ -46,15 +49,28 @@ function normalizePoint(value: unknown): Point | null {
 function normalizeTrendline(value: unknown): Trendline | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 
-  const maybeLine = value as { id?: unknown; start?: unknown; end?: unknown };
+  const maybeLine = value as {
+    id?: unknown;
+    start?: unknown;
+    end?: unknown;
+    extend?: unknown;
+  };
   const start = normalizePoint(maybeLine.start);
   const end = normalizePoint(maybeLine.end);
   if (!start || !end) return null;
+
+  const extend: LineExtension =
+    maybeLine.extend === "none" ||
+    maybeLine.extend === "right" ||
+    maybeLine.extend === "both"
+      ? maybeLine.extend
+      : DEFAULT_TRENDLINE_EXTENSION;
 
   return {
     id: typeof maybeLine.id === "string" ? maybeLine.id : createDrawingId("trendline"),
     start,
     end,
+    extend,
   };
 }
 
@@ -124,6 +140,7 @@ export default function LayoutManager({
   rangeSource,
   setRangeSource,
   tool,
+  magnet,
 }: any) {
   const [vSplit, setVSplit] = useState(0.5);
   const [hSplit, setHSplit] = useState(0.5);
@@ -150,6 +167,7 @@ export default function LayoutManager({
     externalRange: timeRange,
     rangeSource,
     tool,
+    magnet,
   };
 
   const updatePanel = useCallback((id: string, updates: Partial<Panel>) => {
@@ -196,6 +214,47 @@ export default function LayoutManager({
     [updateChartDrawings]
   );
 
+  const handleDeleteDrawing = useCallback(
+    (chartId: string, id: string) => {
+      updateChartDrawings(chartId, (current) => ({
+        trendlines: current.trendlines.filter((line) => line.id !== id),
+        rectangles: current.rectangles.filter((rect) => rect.id !== id),
+      }));
+    },
+    [updateChartDrawings]
+  );
+
+  const handleUpdateDrawing = useCallback(
+    (
+      chartId: string,
+      selection: DrawingSelection,
+      points: { start: Point; end: Point }
+    ) => {
+      updateChartDrawings(chartId, (current) => {
+        if (selection.type === "trendline") {
+          return {
+            trendlines: current.trendlines.map((line) =>
+              line.id === selection.id
+                ? { ...line, start: points.start, end: points.end }
+                : line
+            ),
+            rectangles: current.rectangles,
+          };
+        }
+
+        return {
+          trendlines: current.trendlines,
+          rectangles: current.rectangles.map((rect) =>
+            rect.id === selection.id
+              ? { ...rect, start: points.start, end: points.end }
+              : rect
+          ),
+        };
+      });
+    },
+    [updateChartDrawings]
+  );
+
   const renderPanel = (panel: Panel, onFocus: () => void) => (
     <ChartPanel
       panelId={panel.id}
@@ -205,6 +264,10 @@ export default function LayoutManager({
       drawings={getChartDrawings(panel.id)}
       onAddTrendline={handleAddTrendline}
       onAddRectangle={handleAddRectangle}
+      onDeleteDrawing={(id) => handleDeleteDrawing(panel.id, id)}
+      onUpdateDrawing={(selection, points) =>
+        handleUpdateDrawing(panel.id, selection, points)
+      }
       onFocus={onFocus}
       onSymbolChange={(symbol) => updatePanel(panel.id, { symbol })}
       onTimeframeChange={(timeframe) => updatePanel(panel.id, { timeframe })}
