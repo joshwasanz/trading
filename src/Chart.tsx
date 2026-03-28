@@ -272,13 +272,20 @@ export default function Chart({
 
   const rangeTimeoutRef = useRef<number | null>(null);
   const overlayFrameRef = useRef<number | null>(null);
+  const initFrameRef = useRef<number | null>(null);
+  const readyFrameRef = useRef<number | null>(null);
+  const dataFitFrameRef = useRef<number | null>(null);
   const hasInitialData = useRef(false);
+  const pendingInitialFitRef = useRef(false);
+  const chartReadyRef = useRef(false);
   const activeChartRef = useRef<string | null>(null);
   const toolRef = useRef(tool);
   const magnetRef = useRef(magnet);
   const dataRef = useRef(data);
   const drawingsRef = useRef(drawings);
   const selectedDrawingRef = useRef<DrawingSelection | null>(null);
+  const onAddTrendlineRef = useRef(onAddTrendline);
+  const onAddRectangleRef = useRef(onAddRectangle);
   const onCrosshairMoveRef = useRef(onCrosshairMove);
   const onTimeRangeChangeRef = useRef(onTimeRangeChange);
   const onDeleteDrawingRef = useRef(onDeleteDrawing);
@@ -297,6 +304,7 @@ export default function Chart({
   const setTool = useToolStore((state) => state.setTool);
   const [drawingStep, setDrawingStep] = useState<"none" | "started">("none");
   const [selectedDrawing, setSelectedDrawing] = useState<DrawingSelection | null>(null);
+  const [chartReady, setChartReady] = useState(false);
 
   useEffect(() => {
     toolRef.current = tool;
@@ -323,6 +331,14 @@ export default function Chart({
   }, [selectedDrawing]);
 
   useEffect(() => {
+    onAddTrendlineRef.current = onAddTrendline;
+  }, [onAddTrendline]);
+
+  useEffect(() => {
+    onAddRectangleRef.current = onAddRectangle;
+  }, [onAddRectangle]);
+
+  useEffect(() => {
     onCrosshairMoveRef.current = onCrosshairMove;
   }, [onCrosshairMove]);
 
@@ -338,10 +354,17 @@ export default function Chart({
     onUpdateDrawingRef.current = onUpdateDrawing;
   }, [onUpdateDrawing]);
 
+  const setChartReadyState = useCallback((ready: boolean) => {
+    if (chartReadyRef.current === ready) return;
+
+    chartReadyRef.current = ready;
+    setChartReady(ready);
+  }, []);
+
   const pointToScreen = useCallback((point: Point): ScreenPoint | null => {
     const chart = chartRef.current;
     const series = seriesRef.current;
-    if (!chart || !series) return null;
+    if (!chart || !series || !chartReadyRef.current) return null;
 
     try {
       const dpr = window.devicePixelRatio || 1;
@@ -523,7 +546,7 @@ export default function Chart({
   const pointFromCoordinates = useCallback((x: number, y: number): Point | null => {
     const chart = chartRef.current;
     const series = seriesRef.current;
-    if (!chart || !series) return null;
+    if (!chart || !series || !chartReadyRef.current) return null;
 
     try {
       const time = chart.timeScale().coordinateToTime(x);
@@ -540,7 +563,7 @@ export default function Chart({
   const getRawPointFromParam = useCallback((param: MouseEventParams<Time>): Point | null => {
     const chart = chartRef.current;
     const series = seriesRef.current;
-    if (!chart || !series || !param.point) return null;
+    if (!chart || !series || !chartReadyRef.current || !param.point) return null;
 
     try {
       const timeFromEvent = param.time;
@@ -652,7 +675,7 @@ export default function Chart({
 
   const drawOverlay = useCallback(() => {
     const canvas = overlayRef.current;
-    if (!canvas) return;
+    if (!canvas || !chartReadyRef.current) return;
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
@@ -796,13 +819,19 @@ export default function Chart({
     const width = container.clientWidth;
     const height = container.clientHeight;
 
+    if (width <= 0 || height <= 0) {
+      setChartReadyState(false);
+      return;
+    }
+
     canvas.width = width * dpr;
     canvas.height = height * dpr;
     canvas.style.width = width + "px";
     canvas.style.height = height + "px";
 
+    setChartReadyState(true);
     scheduleOverlayDraw();
-  }, [scheduleOverlayDraw]);
+  }, [scheduleOverlayDraw, setChartReadyState]);
 
   const clearDrawing = useCallback(() => {
     drawStartRef.current = null;
@@ -821,7 +850,9 @@ export default function Chart({
     drawStartRef.current = null;
     drawPreviewRef.current = null;
     setDrawingStep("none");
-  }, [seriesKey, resetDragState]);
+    setSelectedDrawing(null);
+    scheduleOverlayDraw();
+  }, [resetDragState, scheduleOverlayDraw, seriesKey]);
 
   useEffect(() => {
     if (activeChart && activeChart !== chartId && selectedDrawingRef.current) {
@@ -858,6 +889,35 @@ export default function Chart({
       setContainerCursor(getDefaultCursor());
     }
   }, [getDefaultCursor, setContainerCursor, tool]);
+
+  useEffect(() => {
+    if (readyFrameRef.current !== null) {
+      window.cancelAnimationFrame(readyFrameRef.current);
+      readyFrameRef.current = null;
+    }
+
+    if (!chartReady) return;
+
+    readyFrameRef.current = window.requestAnimationFrame(() => {
+      readyFrameRef.current = null;
+      if (!chartRef.current || !chartReadyRef.current) return;
+
+      if (pendingInitialFitRef.current) {
+        pendingInitialFitRef.current = false;
+        hasInitialData.current = true;
+        chartRef.current.timeScale().fitContent();
+      }
+
+      scheduleOverlayDraw();
+    });
+
+    return () => {
+      if (readyFrameRef.current !== null) {
+        window.cancelAnimationFrame(readyFrameRef.current);
+        readyFrameRef.current = null;
+      }
+    };
+  }, [chartReady, scheduleOverlayDraw]);
 
   useEffect(() => {
     const handleMouseUp = () => {
@@ -922,14 +982,19 @@ export default function Chart({
     const container = containerRef.current;
 
     hasInitialData.current = false;
+    pendingInitialFitRef.current = false;
+    setChartReadyState(false);
     resetDragState();
     drawStartRef.current = null;
     drawPreviewRef.current = null;
     setDrawingStep("none");
 
+    const initialWidth = Math.max(container.clientWidth, 1);
+    const initialHeight = Math.max(container.clientHeight, 1);
+
     const chart = createChart(container, {
-      width: 0,
-      height: 0,
+      width: initialWidth,
+      height: initialHeight,
       handleScroll: { mouseWheel: true, pressedMouseMove: true },
       handleScale: {
         mouseWheel: true,
@@ -993,13 +1058,20 @@ export default function Chart({
     };
     container.addEventListener("mousedown", handleMouseDown);
 
-    window.requestAnimationFrame(() => {
-      chart.resize(container.clientWidth, container.clientHeight);
+    chart.resize(Math.max(container.clientWidth, 1), Math.max(container.clientHeight, 1));
+    syncOverlaySize();
+
+    initFrameRef.current = window.requestAnimationFrame(() => {
+      initFrameRef.current = null;
+      if (chartRef.current !== chart) return;
+
+      chart.resize(Math.max(container.clientWidth, 1), Math.max(container.clientHeight, 1));
       syncOverlaySize();
+      scheduleOverlayDraw();
     });
 
     const resizeObserver = new ResizeObserver(() => {
-      chart.resize(container.clientWidth, container.clientHeight);
+      chart.resize(Math.max(container.clientWidth, 1), Math.max(container.clientHeight, 1));
       syncOverlaySize();
     });
     resizeObserver.observe(container);
@@ -1189,7 +1261,7 @@ export default function Chart({
             end: point,
             extend: DEFAULT_TRENDLINE_EXTENSION,
           };
-          onAddTrendline(chartId, line);
+          onAddTrendlineRef.current(chartId, line);
           setSelectedDrawing({ type: "trendline", id: line.id });
         } else {
           const rect: Rectangle = {
@@ -1197,7 +1269,7 @@ export default function Chart({
             start,
             end: point,
           };
-          onAddRectangle(chartId, rect);
+          onAddRectangleRef.current(chartId, rect);
           setSelectedDrawing({ type: "rectangle", id: rect.id });
         }
 
@@ -1230,8 +1302,24 @@ export default function Chart({
         window.cancelAnimationFrame(overlayFrameRef.current);
       }
 
+      if (initFrameRef.current !== null) {
+        window.cancelAnimationFrame(initFrameRef.current);
+        initFrameRef.current = null;
+      }
+
+      if (readyFrameRef.current !== null) {
+        window.cancelAnimationFrame(readyFrameRef.current);
+        readyFrameRef.current = null;
+      }
+
+      if (dataFitFrameRef.current !== null) {
+        window.cancelAnimationFrame(dataFitFrameRef.current);
+        dataFitFrameRef.current = null;
+      }
+
       resizeObserver.disconnect();
       chart.remove();
+      setChartReadyState(false);
       resetDragState();
 
       if (chartRef.current === chart) chartRef.current = null;
@@ -1247,13 +1335,12 @@ export default function Chart({
     hitTestDragTarget,
     hitTestDrawings,
     hitTestSelectedHandles,
-    onAddRectangle,
-    onAddTrendline,
     pointFromCoordinates,
     resetDragState,
     scheduleOverlayDraw,
     setActiveChart,
     setContainerCursor,
+    setChartReadyState,
     setPressedNavigationEnabled,
     setTool,
     syncOverlaySize,
@@ -1270,8 +1357,22 @@ export default function Chart({
       seriesRef.current.setData(nextData);
 
       if (!hasInitialData.current && nextData.length > 0) {
-        hasInitialData.current = true;
-        chartRef.current.timeScale().fitContent();
+        if (chartReadyRef.current) {
+          hasInitialData.current = true;
+          if (dataFitFrameRef.current !== null) {
+            window.cancelAnimationFrame(dataFitFrameRef.current);
+          }
+
+          dataFitFrameRef.current = window.requestAnimationFrame(() => {
+            dataFitFrameRef.current = null;
+            if (!chartReadyRef.current) return;
+
+            chartRef.current?.timeScale().fitContent();
+            scheduleOverlayDraw();
+          });
+        } else {
+          pendingInitialFitRef.current = true;
+        }
       }
 
       scheduleOverlayDraw();

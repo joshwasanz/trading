@@ -9,10 +9,14 @@ type Props = {
   timeframe: Timeframe;
   data: any[];
   drawings: ChartDrawings;
-  onAddTrendline: (chartId: string, line: Trendline) => void;
-  onAddRectangle: (chartId: string, rect: Rectangle) => void;
-  onDeleteDrawing?: (id: string) => void;
-  onUpdateDrawing?: (selection: DrawingSelection, points: { start: Point; end: Point }) => void;
+  onAddTrendline: (symbol: string, line: Trendline) => void;
+  onAddRectangle: (symbol: string, rect: Rectangle) => void;
+  onDeleteDrawing?: (symbol: string, id: string) => void;
+  onUpdateDrawing?: (
+    symbol: string,
+    selection: DrawingSelection,
+    points: { start: Point; end: Point }
+  ) => void;
   onFocus: () => void;
   onSymbolChange?: (symbol: string) => void;
   onTimeframeChange?: (tf: Timeframe) => void;
@@ -86,10 +90,16 @@ export default function ChartPanel({
           chartId={chartId}
           seriesKey={`${symbol}_${timeframe}`}
           drawings={drawings}
-          onAddTrendline={onAddTrendline}
-          onAddRectangle={onAddRectangle}
-          onDeleteDrawing={onDeleteDrawing}
-          onUpdateDrawing={onUpdateDrawing}
+          onAddTrendline={(_, line) => onAddTrendline(symbol, line)}
+          onAddRectangle={(_, rect) => onAddRectangle(symbol, rect)}
+          onDeleteDrawing={
+            onDeleteDrawing ? (id) => onDeleteDrawing(symbol, id) : undefined
+          }
+          onUpdateDrawing={
+            onUpdateDrawing
+              ? (selection, points) => onUpdateDrawing(symbol, selection, points)
+              : undefined
+          }
           activeChart={activeChart}
           setActiveChart={setActiveChart}
           onCrosshairMove={onCrosshairMove}

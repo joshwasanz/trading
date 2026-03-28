@@ -30,7 +30,11 @@ const DEFAULT_PANELS: Panel[] = [
   { id: "F", symbol: "dxy", timeframe: "1m" },
 ];
 
-const DRAWINGS_STORAGE_KEY = "layout-manager-drawings-v1";
+const DRAWINGS_STORAGE_KEY = "layout-manager-drawings-v2";
+const LEGACY_DRAWINGS_STORAGE_KEY = "layout-manager-drawings-v1";
+const DEFAULT_PANEL_SYMBOL_BY_ID = Object.fromEntries(
+  DEFAULT_PANELS.map((panel) => [panel.id, panel.symbol])
+) as Record<string, string>;
 
 function normalizePoint(value: unknown): Point | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -105,24 +109,55 @@ function normalizeChartDrawings(value: unknown): ChartDrawings {
   };
 }
 
+function normalizeDrawingsState(value: unknown): DrawingsState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, chartDrawings]) => [
+      key,
+      normalizeChartDrawings(chartDrawings),
+    ])
+  );
+}
+
+function mergeUniqueById<T extends { id: string }>(items: T[]): T[] {
+  return Array.from(new Map(items.map((item) => [item.id, item])).values());
+}
+
+function mergeChartDrawings(current: ChartDrawings, incoming: ChartDrawings): ChartDrawings {
+  return {
+    trendlines: mergeUniqueById([...current.trendlines, ...incoming.trendlines]),
+    rectangles: mergeUniqueById([...current.rectangles, ...incoming.rectangles]),
+  };
+}
+
+function migrateLegacyDrawings(legacyDrawings: DrawingsState): DrawingsState {
+  return Object.entries(legacyDrawings).reduce<DrawingsState>((next, [panelId, chartDrawings]) => {
+    const symbol = DEFAULT_PANEL_SYMBOL_BY_ID[panelId];
+    if (!symbol) return next;
+
+    return {
+      ...next,
+      [symbol]: mergeChartDrawings(next[symbol] ?? EMPTY_CHART_DRAWINGS, chartDrawings),
+    };
+  }, {});
+}
+
 function readStoredDrawings(): DrawingsState {
   if (typeof window === "undefined") return {};
 
   try {
-    const stored = window.localStorage.getItem(DRAWINGS_STORAGE_KEY);
-    if (!stored) return {};
-
-    const parsed: unknown = JSON.parse(stored);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return {};
+    const currentStored = window.localStorage.getItem(DRAWINGS_STORAGE_KEY);
+    if (currentStored) {
+      return normalizeDrawingsState(JSON.parse(currentStored));
     }
 
-    return Object.fromEntries(
-      Object.entries(parsed as Record<string, unknown>).map(([chartId, chartDrawings]) => [
-        chartId,
-        normalizeChartDrawings(chartDrawings),
-      ])
-    );
+    const legacyStored = window.localStorage.getItem(LEGACY_DRAWINGS_STORAGE_KEY);
+    if (!legacyStored) return {};
+
+    return migrateLegacyDrawings(normalizeDrawingsState(JSON.parse(legacyStored)));
   } catch (error) {
     console.error("[LayoutManager] Failed to read drawings:", error);
     return {};
@@ -146,15 +181,15 @@ export default function LayoutManager({
   const [hSplit, setHSplit] = useState(0.5);
   const [panels, setPanels] = useState<Panel[]>(DEFAULT_PANELS);
   const [focused, setFocused] = useState<string | null>(null);
-  const [drawingsByChart, setDrawingsByChart] = useState<DrawingsState>(() => readStoredDrawings());
+  const [drawingsBySymbol, setDrawingsBySymbol] = useState<DrawingsState>(() => readStoredDrawings());
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(DRAWINGS_STORAGE_KEY, JSON.stringify(drawingsByChart));
+      window.localStorage.setItem(DRAWINGS_STORAGE_KEY, JSON.stringify(drawingsBySymbol));
     } catch (error) {
       console.error("[LayoutManager] Failed to save drawings:", error);
     }
-  }, [drawingsByChart]);
+  }, [drawingsBySymbol]);
 
   const sharedProps = {
     activeChart,
@@ -176,18 +211,18 @@ export default function LayoutManager({
 
   const getPanel = useCallback((id: string) => panels.find((panel) => panel.id === id)!, [panels]);
 
-  const getChartDrawings = useCallback(
-    (chartId: string): ChartDrawings => drawingsByChart[chartId] ?? EMPTY_CHART_DRAWINGS,
-    [drawingsByChart]
+  const getSymbolDrawings = useCallback(
+    (symbol: string): ChartDrawings => drawingsBySymbol[symbol] ?? EMPTY_CHART_DRAWINGS,
+    [drawingsBySymbol]
   );
 
-  const updateChartDrawings = useCallback(
-    (chartId: string, updater: (current: ChartDrawings) => ChartDrawings) => {
-      setDrawingsByChart((prev) => {
-        const current = prev[chartId] ?? EMPTY_CHART_DRAWINGS;
+  const updateSymbolDrawings = useCallback(
+    (symbol: string, updater: (current: ChartDrawings) => ChartDrawings) => {
+      setDrawingsBySymbol((prev) => {
+        const current = prev[symbol] ?? EMPTY_CHART_DRAWINGS;
         return {
           ...prev,
-          [chartId]: updater(current),
+          [symbol]: updater(current),
         };
       });
     },
@@ -195,42 +230,42 @@ export default function LayoutManager({
   );
 
   const handleAddTrendline = useCallback(
-    (chartId: string, line: Trendline) => {
-      updateChartDrawings(chartId, (current) => ({
+    (symbol: string, line: Trendline) => {
+      updateSymbolDrawings(symbol, (current) => ({
         trendlines: [...current.trendlines, line],
         rectangles: current.rectangles,
       }));
     },
-    [updateChartDrawings]
+    [updateSymbolDrawings]
   );
 
   const handleAddRectangle = useCallback(
-    (chartId: string, rect: Rectangle) => {
-      updateChartDrawings(chartId, (current) => ({
+    (symbol: string, rect: Rectangle) => {
+      updateSymbolDrawings(symbol, (current) => ({
         trendlines: current.trendlines,
         rectangles: [...current.rectangles, rect],
       }));
     },
-    [updateChartDrawings]
+    [updateSymbolDrawings]
   );
 
   const handleDeleteDrawing = useCallback(
-    (chartId: string, id: string) => {
-      updateChartDrawings(chartId, (current) => ({
+    (symbol: string, id: string) => {
+      updateSymbolDrawings(symbol, (current) => ({
         trendlines: current.trendlines.filter((line) => line.id !== id),
         rectangles: current.rectangles.filter((rect) => rect.id !== id),
       }));
     },
-    [updateChartDrawings]
+    [updateSymbolDrawings]
   );
 
   const handleUpdateDrawing = useCallback(
     (
-      chartId: string,
+      symbol: string,
       selection: DrawingSelection,
       points: { start: Point; end: Point }
     ) => {
-      updateChartDrawings(chartId, (current) => {
+      updateSymbolDrawings(symbol, (current) => {
         if (selection.type === "trendline") {
           return {
             trendlines: current.trendlines.map((line) =>
@@ -252,7 +287,7 @@ export default function LayoutManager({
         };
       });
     },
-    [updateChartDrawings]
+    [updateSymbolDrawings]
   );
 
   const renderPanel = (panel: Panel, onFocus: () => void) => (
@@ -261,13 +296,11 @@ export default function LayoutManager({
       symbol={panel.symbol}
       timeframe={panel.timeframe}
       data={data[panel.symbol]?.[panel.timeframe] || []}
-      drawings={getChartDrawings(panel.id)}
+      drawings={getSymbolDrawings(panel.symbol)}
       onAddTrendline={handleAddTrendline}
       onAddRectangle={handleAddRectangle}
-      onDeleteDrawing={(id) => handleDeleteDrawing(panel.id, id)}
-      onUpdateDrawing={(selection, points) =>
-        handleUpdateDrawing(panel.id, selection, points)
-      }
+      onDeleteDrawing={handleDeleteDrawing}
+      onUpdateDrawing={handleUpdateDrawing}
       onFocus={onFocus}
       onSymbolChange={(symbol) => updatePanel(panel.id, { symbol })}
       onTimeframeChange={(timeframe) => updatePanel(panel.id, { timeframe })}
