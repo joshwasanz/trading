@@ -21,7 +21,11 @@ export default function Sidebar() {
   }) => (
     <div style={{ position: "relative" }}>
       <button
-        onClick={() => setTool(value)}
+        onClick={() => {
+          console.log("Sidebar click:", value);
+          setTool(value);
+        }}
+          
         onMouseEnter={() => setHoveredTool(value)}
         onMouseLeave={() => setHoveredTool(null)}
         style={{

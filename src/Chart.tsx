@@ -1,5 +1,14 @@
-import { useEffect, useRef, useState } from "react";
-import { createChart, CrosshairMode } from "lightweight-charts";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  createChart,
+  CrosshairMode,
+  type CandlestickData,
+  type IChartApi,
+  type ISeriesApi,
+  type MouseEventParams,
+  type Time,
+  type UTCTimestamp,
+} from "lightweight-charts";
 
 type Candle = {
   time: number;
@@ -10,23 +19,24 @@ type Candle = {
 };
 
 type Point = {
-  time: number;
+  time: UTCTimestamp;
   price: number;
+};
+
+type Trendline = {
+  start: Point;
+  end: Point;
 };
 
 type Props = {
   data: Candle[];
   symbol: string;
-
   onCrosshairMove?: (time: number) => void;
   onTimeRangeChange?: (range: any, chartId: string) => void;
   externalRange?: any;
-
   activeChart?: string | null;
   setActiveChart?: (id: string) => void;
-
   rangeSource?: string | null;
-
   chartId: string;
   tool?: string | null;
 };
@@ -43,59 +53,135 @@ export default function Chart({
   tool,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<any>(null);
-  const seriesRef = useRef<any>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const seriesRef = useRef<ISeriesApi<"Candlestick", Time> | null>(null);
+  const overlayRef = useRef<HTMLCanvasElement>(null);
 
-  const rangeTimeoutRef = useRef<any>(null);
+  const rangeTimeoutRef = useRef<number | null>(null);
+  const drawingStepTimeoutRef = useRef<number | null>(null);
   const hasInitialData = useRef(false);
-
   const activeChartRef = useRef<string | null>(null);
+  const toolRef = useRef(tool);
 
-  // 🔥 DRAWING STATE
-  const drawingRef = useRef<{
-    start: Point | null;
-    tempSeries: any;
-  }>({
-    start: null,
-    tempSeries: null,
-  });
+  // Drawing data — stored in refs so no React re-render needed for canvas ops
+  const drawStartRef = useRef<Point | null>(null);
+  const drawPreviewRef = useRef<Point | null>(null);
+  const trendlinesRef = useRef<Trendline[]>([]);
 
-  // 🔥 UI STATE FOR DRAWING FEEDBACK
   const [drawingStep, setDrawingStep] = useState<"none" | "started" | "finished">("none");
 
-  useEffect(() => {
-    activeChartRef.current = activeChart ?? null;
-  }, [activeChart]);
+  useEffect(() => { toolRef.current = tool; }, [tool]);
+  useEffect(() => { activeChartRef.current = activeChart ?? null; }, [activeChart]);
 
-  // 🔥 RESET DRAWING STATE WHEN TOOL CHANGES
+  // ── CANVAS OVERLAY ────────────────────────────────────────────────────────
+
+  const drawOverlay = useCallback(() => {
+    const canvas = overlayRef.current;
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    if (!canvas || !chart || !series) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const toXY = (p: Point): { x: number; y: number } | null => {
+      try {
+        const x = chart.timeScale().timeToCoordinate(p.time);
+        const y = series.priceToCoordinate(p.price);
+        if (x === null || y === null) return null;
+        return { x: x * dpr, y: y * dpr };
+      } catch {
+        return null;
+      }
+    };
+
+    // Committed trendlines
+    ctx.save();
+    ctx.strokeStyle = "#4da3ff";
+    ctx.lineWidth = 2 * dpr;
+    ctx.lineCap = "round";
+    for (const line of trendlinesRef.current) {
+      const s = toXY(line.start);
+      const e = toXY(line.end);
+      if (!s || !e) continue;
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.lineTo(e.x, e.y);
+      ctx.stroke();
+    }
+
+    // Live preview line
+    if (drawStartRef.current && drawPreviewRef.current) {
+      const s = toXY(drawStartRef.current);
+      const e = toXY(drawPreviewRef.current);
+      if (s && e) {
+        ctx.setLineDash([6 * dpr, 4 * dpr]);
+        ctx.globalAlpha = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(s.x, s.y);
+        ctx.lineTo(e.x, e.y);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }, []);
+
+  const syncOverlaySize = useCallback(() => {
+    const canvas = overlayRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    drawOverlay();
+  }, [drawOverlay]);
+
+  // ── DRAWING STATE ─────────────────────────────────────────────────────────
+
+  const clearDrawing = useCallback(() => {
+    if (drawingStepTimeoutRef.current !== null) {
+      window.clearTimeout(drawingStepTimeoutRef.current);
+      drawingStepTimeoutRef.current = null;
+    }
+    drawStartRef.current = null;
+    drawPreviewRef.current = null;
+    drawOverlay();
+  }, [drawOverlay]);
+
   useEffect(() => {
     if (tool !== "trendline") {
+      clearDrawing();
       setDrawingStep("none");
-      drawingRef.current.start = null;
-      drawingRef.current.tempSeries = null;
     }
-  }, [tool]);
+  }, [tool, clearDrawing]);
 
-  // ==================== CREATE CHART ====================
+  // ── CHART SETUP ───────────────────────────────────────────────────────────
+
   useEffect(() => {
     if (!containerRef.current) return;
-
     const container = containerRef.current;
+
+    hasInitialData.current = false;
+    trendlinesRef.current = [];
+    drawStartRef.current = null;
+    drawPreviewRef.current = null;
+    setDrawingStep("none");
 
     const chart = createChart(container, {
       width: 0,
       height: 0,
-      handleScroll: {
-        mouseWheel: true,
-        pressedMouseMove: true,
-      },
+      handleScroll: { mouseWheel: true, pressedMouseMove: true },
       handleScale: {
         mouseWheel: true,
         pinch: true,
-        axisPressedMouseMove: {
-          time: true,
-          price: true,
-        },
+        axisPressedMouseMove: { time: true, price: true },
       },
       layout: {
         background: { color: "#0e0e11" },
@@ -105,9 +191,7 @@ export default function Chart({
         vertLines: { color: "#1c1f26" },
         horzLines: { color: "#1c1f26" },
       },
-      crosshair: {
-        mode: CrosshairMode.Normal,
-      },
+      crosshair: { mode: CrosshairMode.Normal },
     });
 
     const series = chart.addCandlestickSeries({
@@ -118,149 +202,171 @@ export default function Chart({
     chartRef.current = chart;
     seriesRef.current = series;
 
-    // ==================== ACTIVE ====================
-    const handleMouseDown = () => {
-      setActiveChart?.(chartId);
-    };
-
+    const handleMouseDown = () => setActiveChart?.(chartId);
     container.addEventListener("mousedown", handleMouseDown);
 
-    // ==================== RESIZE ====================
     requestAnimationFrame(() => {
       chart.resize(container.clientWidth, container.clientHeight);
+      syncOverlaySize();
     });
 
     const resizeObserver = new ResizeObserver(() => {
       chart.resize(container.clientWidth, container.clientHeight);
+      syncOverlaySize();
     });
-
     resizeObserver.observe(container);
 
-    // ==================== RANGE ====================
-    chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-      if (!range) return;
-      if (activeChartRef.current !== chartId) return;
+    const getPoint = (param: MouseEventParams<Time>): Point | null => {
+      if (!param.point) return null;
 
-      clearTimeout(rangeTimeoutRef.current);
+      const timeFromEvent = param.time;
+      const timeFromCoord = chart.timeScale().coordinateToTime(param.point.x);
+      const price = series.coordinateToPrice(param.point.y);
 
-      rangeTimeoutRef.current = setTimeout(() => {
+      // Prefer the snapped candle time; fall back to interpolated coordinate time.
+      // Both are checked explicitly — coordinateToTime can return BusinessDay or null.
+      const time =
+        typeof timeFromEvent === "number"
+          ? timeFromEvent
+          : typeof timeFromCoord === "number"
+          ? timeFromCoord
+          : null;
+
+      if (time === null || price === null) return null;
+
+      return { time: time as UTCTimestamp, price };
+    };
+
+    const handleVisibleRangeChange = (range: any) => {
+      drawOverlay(); // redraw lines when chart pans/zooms
+      if (!range || activeChartRef.current !== chartId) return;
+      if (rangeTimeoutRef.current !== null) window.clearTimeout(rangeTimeoutRef.current);
+      rangeTimeoutRef.current = window.setTimeout(() => {
         onTimeRangeChange?.(range, chartId);
       }, 60);
-    });
-
-    // ==================== CROSSHAIR ====================
-    let lastCrosshairTime = 0;
-    chart.subscribeCrosshairMove((param) => {
-      if (!param.time) return;
-
-      lastCrosshairTime = param.time as number;
-      onCrosshairMove?.(param.time as number);
-
-      // 🔥 DRAW PREVIEW
-      if (tool === "trendline" && drawingRef.current.start) {
-        drawingRef.current.tempSeries.setData([
-          { time: drawingRef.current.start.time, value: drawingRef.current.start.price },
-          { time: lastCrosshairTime, value: drawingRef.current.start.price },
-        ]);
-      }
-    });
-
-    // ==================== CLICK DRAW ====================
-    const handleClick = (_e: MouseEvent) => {
-      if (tool !== "trendline") {
-        console.log("ℹ️ Tool is not trendline, skipping:", tool);
-        return;
-      }
-
-      console.log("🎯 Trendline click detected!", { tool, dataLength: data.length });
-
-      // 🔥 Get nearest time value from chart state
-      const lastCandle = data[data.length - 1];
-      if (!lastCandle) {
-        console.warn("⚠️ No candle data available");
-        return;
-      }
-
-      const price = (lastCandle.high + lastCandle.low) / 2;
-      // Use last candle time as approximate time for drawing
-      const time = lastCandle.time as any;
-
-      const point: Point = {
-        time: lastCandle.time,
-        price,
-      };
-
-      // FIRST CLICK
-      if (!drawingRef.current.start) {
-        console.log("✓ First click - starting trendline");
-        drawingRef.current.start = point;
-        setDrawingStep("started"); // 🔥 UPDATE UI STATE
-
-        const tempSeries = chart.addLineSeries({
-          color: "#4da3ff",
-          lineWidth: 2,
-        });
-
-        drawingRef.current.tempSeries = tempSeries;
-        tempSeries.setData([
-          { time, value: price },
-          { time, value: price },
-        ]);
-        return;
-      }
-
-      // SECOND CLICK → finalize
-      console.log("✓ Second click - finalizing trendline");
-      drawingRef.current.tempSeries.setData([
-        { time: drawingRef.current.start.time as any, value: drawingRef.current.start.price },
-        { time, value: point.price },
-      ]);
-
-      drawingRef.current.start = null;
-      drawingRef.current.tempSeries = null;
-      setDrawingStep("finished"); // 🔥 UPDATE UI STATE
-      setTimeout(() => setDrawingStep("none"), 1000); // Reset after 1 second
     };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
 
-    // 🔥 ADD CLICK LISTENER
-    console.log("📌 Attaching click listener, current tool:", tool);
-    container.addEventListener("click", handleClick);
+    const handleCrosshairMove = (param: MouseEventParams<Time>) => {
+      try {
+        const point = getPoint(param);
+        if (point) onCrosshairMove?.(point.time as number);
+
+        if (toolRef.current === "trendline" && drawStartRef.current && point) {
+          drawPreviewRef.current = point;
+          drawOverlay();
+        }
+      } catch (err) {
+        console.error("[Chart] crosshairMove error:", err);
+      }
+    };
+    chart.subscribeCrosshairMove(handleCrosshairMove);
+
+    const handleClick = (param: MouseEventParams<Time>) => {
+      try {
+        if (toolRef.current !== "trendline") return;
+        const point = getPoint(param);
+        if (!point) return;
+
+        if (drawingStepTimeoutRef.current !== null) {
+          window.clearTimeout(drawingStepTimeoutRef.current);
+          drawingStepTimeoutRef.current = null;
+        }
+
+        if (!drawStartRef.current) {
+          // First click — set start point
+          drawStartRef.current = point;
+          drawPreviewRef.current = point;
+          setDrawingStep("started");
+          drawOverlay();
+          return;
+        }
+
+        // Second click — skip if same timestamp
+        if (point.time === drawStartRef.current.time) return;
+
+        // Commit trendline
+        trendlinesRef.current = [
+          ...trendlinesRef.current,
+          { start: drawStartRef.current, end: point },
+        ];
+        drawStartRef.current = null;
+        drawPreviewRef.current = null;
+        drawOverlay();
+
+        setDrawingStep("finished");
+        drawingStepTimeoutRef.current = window.setTimeout(() => {
+          setDrawingStep("none");
+          drawingStepTimeoutRef.current = null;
+        }, 1000);
+      } catch (err) {
+        console.error("[Chart] click error:", err);
+        drawStartRef.current = null;
+        drawPreviewRef.current = null;
+        drawOverlay();
+        setDrawingStep("none");
+      }
+    };
+    chart.subscribeClick(handleClick);
 
     return () => {
-      console.log("🗑️ Cleaning up event listeners");
       container.removeEventListener("mousedown", handleMouseDown);
-      container.removeEventListener("click", handleClick);
+      chart.unsubscribeClick(handleClick);
+      chart.unsubscribeCrosshairMove(handleCrosshairMove);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
+      if (rangeTimeoutRef.current !== null) window.clearTimeout(rangeTimeoutRef.current);
+      if (drawingStepTimeoutRef.current !== null) window.clearTimeout(drawingStepTimeoutRef.current);
       resizeObserver.disconnect();
       chart.remove();
+      if (chartRef.current === chart) chartRef.current = null;
+      if (seriesRef.current === series) seriesRef.current = null;
     };
-  }, [chartId, tool]);
+  }, [chartId, drawOverlay, syncOverlaySize]);
 
-  // ==================== DATA ====================
+  // ── DATA ──────────────────────────────────────────────────────────────────
+
   useEffect(() => {
-    if (!seriesRef.current || !chartRef.current) return;
-    if (!data || data.length === 0) return;
-
-    seriesRef.current.setData(data);
-
-    if (!hasInitialData.current) {
-      hasInitialData.current = true;
-      chartRef.current.timeScale().fitContent();
+    if (!seriesRef.current || !chartRef.current || !data?.length) return;
+    try {
+      seriesRef.current.setData(
+        data.map((c) => ({ ...c, time: c.time as UTCTimestamp })) as CandlestickData<Time>[]
+      );
+      if (!hasInitialData.current) {
+        hasInitialData.current = true;
+        chartRef.current.timeScale().fitContent();
+      }
+    } catch (err) {
+      console.error("[Chart] setData error:", err);
     }
   }, [data]);
 
-  // ==================== SYNC ====================
   useEffect(() => {
-    if (!chartRef.current || !externalRange) return;
-    if (rangeSource === chartId) return;
+    if (!chartRef.current || !externalRange || rangeSource === chartId) return;
+    try {
+      chartRef.current.timeScale().setVisibleLogicalRange(externalRange);
+    } catch (err) {
+      console.error("[Chart] setVisibleLogicalRange error:", err);
+    }
+  }, [externalRange, rangeSource, chartId]);
 
-    chartRef.current.timeScale().setVisibleLogicalRange(externalRange);
-  }, [externalRange, rangeSource]);
+  // ── RENDER ────────────────────────────────────────────────────────────────
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
       <div ref={containerRef} className="chart-canvas" />
-      
-      {/* 🔥 DRAWING STATUS INDICATOR */}
+
+      {/* Trendline canvas overlay — pointer-events:none so chart receives all mouse events */}
+      <canvas
+        ref={overlayRef}
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          pointerEvents: "none",
+          zIndex: 5,
+        }}
+      />
+
       {tool === "trendline" && (
         <div
           style={{
@@ -272,24 +378,19 @@ export default function Chart({
               drawingStep === "started"
                 ? "#4da3ff"
                 : drawingStep === "finished"
-                  ? "#26a69a"
-                  : "rgba(77, 163, 255, 0.3)",
+                ? "#26a69a"
+                : "rgba(77, 163, 255, 0.3)",
             color: "#fff",
             fontSize: "11px",
             borderRadius: "3px",
             fontWeight: "500",
             zIndex: 10,
-            animation:
-              drawingStep === "started"
-                ? "pulse 0.5s ease-out"
-                : drawingStep === "finished"
-                  ? "pop 0.5s ease-out"
-                  : "none",
+            pointerEvents: "none",
           }}
         >
           {drawingStep === "none" && "Click to draw trendline"}
-          {drawingStep === "started" && "✓ Click again to finish"}
-          {drawingStep === "finished" && "✓ Done!"}
+          {drawingStep === "started" && "Click another point to finish"}
+          {drawingStep === "finished" && "✓ Trendline drawn"}
         </div>
       )}
     </div>

@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import TopBar from "./components/TopBar";
 import LayoutManager from "./layout/LayoutManager";
 import Sidebar from "./components/SideBar";
+import ErrorBoundary from "./components/ErrorBoundary";
 import { useToolStore } from "./store/useToolStore";
 
 type Candle = {
@@ -50,12 +51,13 @@ function upsertCandleSeries(current: Candle[], incoming: Candle): Candle[] {
 }
 
 // ==================== APP ====================
-function App() {
+function AppInner() {
   const [data, setData] = useState(initialDataState);
   const dataRef = useRef(initialDataState);
 
   const [crosshairTime, setCrosshairTime] = useState<number | null>(null);
   const [timeRange, setTimeRange] = useState<any>(null);
+  const [rangeSource, setRangeSource] = useState<string | null>(null);
   const [activeChart, setActiveChart] = useState<string | null>(null);
   const [layoutType, setLayoutType] = useState("2");
 
@@ -127,6 +129,7 @@ function App() {
     };
   }, []);
 
+
   // ==================== UI ====================
   return (
     <div className="app-shell">
@@ -156,13 +159,23 @@ function App() {
             setCrosshairTime={setCrosshairTime}
             timeRange={timeRange}
             setTimeRange={setTimeRange}
+            rangeSource={rangeSource}
+            setRangeSource={setRangeSource}
             tool={tool} // 🔥 CRITICAL
           />
         </div>
 
       </div>
     </div>
+
+   
   );
 }
 
-export default App;
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppInner />
+    </ErrorBoundary>
+  );
+}

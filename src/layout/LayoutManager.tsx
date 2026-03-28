@@ -3,6 +3,21 @@ import ChartPanel from "./ChartPanel";
 
 type Timeframe = "15s" | "1m" | "3m";
 
+type Panel = {
+  id: string;
+  symbol: string;
+  timeframe: Timeframe;
+};
+
+const DEFAULT_PANELS: Panel[] = [
+  { id: "A", symbol: "nq", timeframe: "15s" },
+  { id: "B", symbol: "es", timeframe: "15s" },
+  { id: "C", symbol: "dxy", timeframe: "15s" },
+  { id: "D", symbol: "nq", timeframe: "1m" },
+  { id: "E", symbol: "es", timeframe: "1m" },
+  { id: "F", symbol: "dxy", timeframe: "1m" },
+];
+
 export default function LayoutManager({
   data,
   layoutType,
@@ -12,19 +27,13 @@ export default function LayoutManager({
   setCrosshairTime,
   timeRange,
   setTimeRange,
-  tool, // 🔥 NEW
+  rangeSource,
+  setRangeSource,
+  tool,
 }: any) {
-
   const [vSplit, setVSplit] = useState(0.5);
   const [hSplit, setHSplit] = useState(0.5);
-
-  // 🔥 PANEL STATE
-  const [panels, setPanels] = useState({
-    A: { symbol: "nq", timeframe: "15s" as Timeframe },
-    B: { symbol: "es", timeframe: "15s" as Timeframe },
-    C: { symbol: "dxy", timeframe: "15s" as Timeframe },
-  });
-
+  const [panels, setPanels] = useState<Panel[]>(DEFAULT_PANELS);
   const [focused, setFocused] = useState<string | null>(null);
 
   const sharedProps = {
@@ -32,74 +41,67 @@ export default function LayoutManager({
     setActiveChart,
     onCrosshairMove: (t: number) => setCrosshairTime(t),
     externalTime: crosshairTime,
-    onTimeRangeChange: (r: any) => setTimeRange(r),
+    onTimeRangeChange: (r: any, sourceChartId: string) => {
+      setTimeRange(r);
+      setRangeSource(sourceChartId);
+    },
     externalRange: timeRange,
-    tool, // 🔥 PASS TOOL DOWN
+    rangeSource,
+    tool,
   };
 
   // ==================== PANEL UPDATE ====================
-  const updatePanel = (key: "A" | "B" | "C", updates: any) => {
-    setPanels((prev) => ({
-      ...prev,
-      [key]: { ...prev[key], ...updates },
-    }));
+  const updatePanel = (id: string, updates: Partial<Panel>) => {
+    setPanels((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, ...updates } : p))
+    );
   };
 
-  // ==================== RESIZE ====================
+  const getPanel = (id: string) => panels.find((p) => p.id === id)!;
 
+  // ==================== RESIZE ====================
   const startVerticalResize = (e: React.MouseEvent) => {
     e.preventDefault();
-
     const onMove = (ev: MouseEvent) => {
-      const newSplit = ev.clientX / window.innerWidth;
-      setVSplit(Math.max(0.2, Math.min(0.8, newSplit)));
+      setVSplit(Math.max(0.2, Math.min(0.8, ev.clientX / window.innerWidth)));
     };
-
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   };
 
   const startHorizontalResize = (e: React.MouseEvent) => {
     e.preventDefault();
-
     const onMove = (ev: MouseEvent) => {
-      const newSplit = ev.clientY / window.innerHeight;
-      setHSplit(Math.max(0.2, Math.min(0.8, newSplit)));
+      setHSplit(Math.max(0.2, Math.min(0.8, ev.clientY / window.innerHeight)));
     };
-
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   };
 
   // ==================== FOCUS MODE ====================
-
   if (focused) {
-    const panel = panels[focused as "A" | "B" | "C"];
-
+    const panel = getPanel(focused);
     return (
       <div className="focus-mode">
         <div className="focus-mode__header">
           <button onClick={() => setFocused(null)}>← Back</button>
         </div>
-
         <div className="focus-mode__content">
           <ChartPanel
             symbol={panel.symbol}
             timeframe={panel.timeframe}
             data={data[panel.symbol]?.[panel.timeframe] || []}
             onFocus={() => setFocused(null)}
-            onSymbolChange={(s) => updatePanel(focused as any, { symbol: s })}
-            onTimeframeChange={(tf) => updatePanel(focused as any, { timeframe: tf })}
+            onSymbolChange={(s) => updatePanel(focused, { symbol: s })}
+            onTimeframeChange={(tf) => updatePanel(focused, { timeframe: tf })}
             {...sharedProps}
           />
         </div>
@@ -108,146 +110,115 @@ export default function LayoutManager({
   }
 
   // ==================== 2 PANEL ====================
-
   if (layoutType === "2") {
+    const [p0, p1] = panels;
     return (
       <div className="layout-engine">
-
         <div style={{ position: "absolute", left: 0, top: 0, width: `${vSplit * 100}%`, height: "100%" }}>
           <ChartPanel
-            symbol={panels.A.symbol}
-            timeframe={panels.A.timeframe}
-            data={data[panels.A.symbol]?.[panels.A.timeframe] || []}
-            onFocus={() => setFocused("A")}
-            onSymbolChange={(s) => updatePanel("A", { symbol: s })}
-            onTimeframeChange={(tf) => updatePanel("A", { timeframe: tf })}
+            symbol={p0.symbol}
+            timeframe={p0.timeframe}
+            data={data[p0.symbol]?.[p0.timeframe] || []}
+            onFocus={() => setFocused(p0.id)}
+            onSymbolChange={(s) => updatePanel(p0.id, { symbol: s })}
+            onTimeframeChange={(tf) => updatePanel(p0.id, { timeframe: tf })}
             {...sharedProps}
           />
         </div>
 
         <div style={{ position: "absolute", left: `${vSplit * 100}%`, top: 0, width: `${(1 - vSplit) * 100}%`, height: "100%" }}>
           <ChartPanel
-            symbol={panels.B.symbol}
-            timeframe={panels.B.timeframe}
-            data={data[panels.B.symbol]?.[panels.B.timeframe] || []}
-            onFocus={() => setFocused("B")}
-            onSymbolChange={(s) => updatePanel("B", { symbol: s })}
-            onTimeframeChange={(tf) => updatePanel("B", { timeframe: tf })}
+            symbol={p1.symbol}
+            timeframe={p1.timeframe}
+            data={data[p1.symbol]?.[p1.timeframe] || []}
+            onFocus={() => setFocused(p1.id)}
+            onSymbolChange={(s) => updatePanel(p1.id, { symbol: s })}
+            onTimeframeChange={(tf) => updatePanel(p1.id, { timeframe: tf })}
             {...sharedProps}
           />
         </div>
 
         <div
           onMouseDown={startVerticalResize}
-          style={{
-            position: "absolute",
-            left: `${vSplit * 100}%`,
-            top: 0,
-            width: "6px",
-            height: "100%",
-            cursor: "col-resize",
-            zIndex: 50,
-            transform: "translateX(-3px)",
-          }}
+          style={{ position: "absolute", left: `${vSplit * 100}%`, top: 0, width: "6px", height: "100%", cursor: "col-resize", zIndex: 50, transform: "translateX(-3px)" }}
         />
       </div>
     );
   }
 
   // ==================== 3 PANEL ====================
-
   if (layoutType === "3") {
+    const [p0, p1, p2] = panels;
     return (
       <div className="layout-engine">
-
-        {/* LEFT */}
         <div style={{ position: "absolute", left: 0, top: 0, width: `${vSplit * 100}%`, height: "100%" }}>
           <ChartPanel
-            symbol={panels.A.symbol}
-            timeframe={panels.A.timeframe}
-            data={data[panels.A.symbol]?.[panels.A.timeframe] || []}
-            onFocus={() => setFocused("A")}
-            onSymbolChange={(s) => updatePanel("A", { symbol: s })}
-            onTimeframeChange={(tf) => updatePanel("A", { timeframe: tf })}
+            symbol={p0.symbol}
+            timeframe={p0.timeframe}
+            data={data[p0.symbol]?.[p0.timeframe] || []}
+            onFocus={() => setFocused(p0.id)}
+            onSymbolChange={(s) => updatePanel(p0.id, { symbol: s })}
+            onTimeframeChange={(tf) => updatePanel(p0.id, { timeframe: tf })}
             {...sharedProps}
           />
         </div>
 
-        {/* TOP RIGHT */}
         <div style={{ position: "absolute", left: `${vSplit * 100}%`, top: 0, width: `${(1 - vSplit) * 100}%`, height: `${hSplit * 100}%` }}>
           <ChartPanel
-            symbol={panels.B.symbol}
-            timeframe={panels.B.timeframe}
-            data={data[panels.B.symbol]?.[panels.B.timeframe] || []}
-            onFocus={() => setFocused("B")}
-            onSymbolChange={(s) => updatePanel("B", { symbol: s })}
-            onTimeframeChange={(tf) => updatePanel("B", { timeframe: tf })}
+            symbol={p1.symbol}
+            timeframe={p1.timeframe}
+            data={data[p1.symbol]?.[p1.timeframe] || []}
+            onFocus={() => setFocused(p1.id)}
+            onSymbolChange={(s) => updatePanel(p1.id, { symbol: s })}
+            onTimeframeChange={(tf) => updatePanel(p1.id, { timeframe: tf })}
             {...sharedProps}
           />
         </div>
 
-        {/* BOTTOM RIGHT */}
         <div style={{ position: "absolute", left: `${vSplit * 100}%`, top: `${hSplit * 100}%`, width: `${(1 - vSplit) * 100}%`, height: `${(1 - hSplit) * 100}%` }}>
           <ChartPanel
-            symbol={panels.C.symbol}
-            timeframe={panels.C.timeframe}
-            data={data[panels.C.symbol]?.[panels.C.timeframe] || []}
-            onFocus={() => setFocused("C")}
-            onSymbolChange={(s) => updatePanel("C", { symbol: s })}
-            onTimeframeChange={(tf) => updatePanel("C", { timeframe: tf })}
+            symbol={p2.symbol}
+            timeframe={p2.timeframe}
+            data={data[p2.symbol]?.[p2.timeframe] || []}
+            onFocus={() => setFocused(p2.id)}
+            onSymbolChange={(s) => updatePanel(p2.id, { symbol: s })}
+            onTimeframeChange={(tf) => updatePanel(p2.id, { timeframe: tf })}
             {...sharedProps}
           />
         </div>
 
-        {/* DIVIDERS */}
-        <div onMouseDown={startVerticalResize} style={{ position: "absolute", left: `${vSplit * 100}%`, top: 0, width: "6px", height: "100%", cursor: "col-resize", transform: "translateX(-3px)" }} />
-        <div onMouseDown={startHorizontalResize} style={{ position: "absolute", left: `${vSplit * 100}%`, top: `${hSplit * 100}%`, width: `${(1 - vSplit) * 100}%`, height: "6px", cursor: "row-resize", transform: "translateY(-3px)" }} />
+        <div onMouseDown={startVerticalResize} style={{ position: "absolute", left: `${vSplit * 100}%`, top: 0, width: "6px", height: "100%", cursor: "col-resize", transform: "translateX(-3px)", zIndex: 50 }} />
+        <div onMouseDown={startHorizontalResize} style={{ position: "absolute", left: `${vSplit * 100}%`, top: `${hSplit * 100}%`, width: `${(1 - vSplit) * 100}%`, height: "6px", cursor: "row-resize", transform: "translateY(-3px)", zIndex: 50 }} />
       </div>
     );
   }
 
   // ==================== 6 PANEL ====================
-
   if (layoutType === "6") {
     return (
       <div className="layout-engine">
-
-        {[0, 1, 2].map((i) => (
-          <div key={`top-${i}`} style={{
-            position: "absolute",
-            left: `${i * 33.33}%`,
-            top: 0,
-            width: "33.33%",
-            height: "50%",
-          }}>
+        {panels.map((panel, i) => (
+          <div
+            key={panel.id}
+            style={{
+              position: "absolute",
+              left: `${(i % 3) * 33.33}%`,
+              top: i < 3 ? "0%" : "50%",
+              width: "33.33%",
+              height: "50%",
+            }}
+          >
             <ChartPanel
-              symbol={panels[["A","B","C"][i] as "A"|"B"|"C"].symbol}
-              timeframe={panels[["A","B","C"][i] as "A"|"B"|"C"].timeframe}
-              data={data[panels[["A","B","C"][i] as "A"|"B"|"C"].symbol]?.[panels[["A","B","C"][i] as "A"|"B"|"C"].timeframe] || []}
-              onFocus={() => setFocused(["A","B","C"][i])}
+              symbol={panel.symbol}
+              timeframe={panel.timeframe}
+              data={data[panel.symbol]?.[panel.timeframe] || []}
+              onFocus={() => setFocused(panel.id)}
+              onSymbolChange={(s) => updatePanel(panel.id, { symbol: s })}
+              onTimeframeChange={(tf) => updatePanel(panel.id, { timeframe: tf })}
               {...sharedProps}
             />
           </div>
         ))}
-
-        {[0, 1, 2].map((i) => (
-          <div key={`bottom-${i}`} style={{
-            position: "absolute",
-            left: `${i * 33.33}%`,
-            top: "50%",
-            width: "33.33%",
-            height: "50%",
-          }}>
-            <ChartPanel
-              symbol={panels[["A","B","C"][i] as "A"|"B"|"C"].symbol}
-              timeframe={panels[["A","B","C"][i] as "A"|"B"|"C"].timeframe}
-              data={data[panels[["A","B","C"][i] as "A"|"B"|"C"].symbol]?.[panels[["A","B","C"][i] as "A"|"B"|"C"].timeframe] || []}
-              onFocus={() => setFocused(["A","B","C"][i])}
-              {...sharedProps}
-            />
-          </div>
-        ))}
-
       </div>
     );
   }

@@ -14,6 +14,8 @@ type Props = {
   onCrosshairMove?: (t: number) => void;
   onTimeRangeChange?: (range: any, chartId: string) => void;
   externalRange?: any;
+  rangeSource?: string | null;
+  tool?: string | null; // 🔥 ADDED
 };
 
 export default function ChartPanel({
@@ -28,22 +30,15 @@ export default function ChartPanel({
   onCrosshairMove,
   onTimeRangeChange,
   externalRange,
+  rangeSource,
+  tool, // 🔥 ADDED
 }: Props) {
-
-  // 🔥 UNIQUE CHART IDENTITY (symbol + timeframe)
   const chartId = `${symbol}_${timeframe}`;
 
   return (
     <div className="chart-panel">
-
-      {/* ================= HEADER ================= */}
       <div className="chart-panel__drag-handle">
-
-        {/* SYMBOL */}
-        <select
-          value={symbol}
-          onChange={(e) => onSymbolChange?.(e.target.value)}
-        >
+        <select value={symbol} onChange={(e) => onSymbolChange?.(e.target.value)}>
           <option value="nq">NQ</option>
           <option value="es">ES</option>
           <option value="dax">DAX</option>
@@ -52,41 +47,24 @@ export default function ChartPanel({
           <option value="gold">GOLD</option>
         </select>
 
-        {/* TIMEFRAME */}
-        <select
-          value={timeframe}
-          onChange={(e) =>
-            onTimeframeChange?.(e.target.value as Timeframe)
-          }
-        >
+        <select value={timeframe} onChange={(e) => onTimeframeChange?.(e.target.value as Timeframe)}>
           <option value="15s">15s</option>
           <option value="1m">1m</option>
           <option value="3m">3m</option>
         </select>
 
-        {/* ACTIVE INDICATOR */}
-        <div
-          style={{
-            marginLeft: "6px",
-            fontSize: "10px",
-            color: activeChart === symbol ? "#4da3ff" : "#555",
-          }}
-        >
+        <div style={{ marginLeft: "6px", fontSize: "10px", color: activeChart === chartId ? "#4da3ff" : "#555" }}>
           ●
         </div>
 
-        {/* FOCUS */}
         <button
-          className={`chart-panel__focus ${
-            activeChart === symbol ? "chart-panel__focus--active" : ""
-          }`}
+          className={`chart-panel__focus ${activeChart === chartId ? "chart-panel__focus--active" : ""}`}
           onClick={onFocus}
         >
           ⤢
         </button>
       </div>
 
-      {/* ================= CHART ================= */}
       <div className="chart-panel__body">
         <Chart
           symbol={symbol}
@@ -97,6 +75,8 @@ export default function ChartPanel({
           onCrosshairMove={onCrosshairMove}
           onTimeRangeChange={onTimeRangeChange}
           externalRange={externalRange}
+          rangeSource={rangeSource}
+          tool={tool} // 🔥 FIXED — was missing before
         />
       </div>
     </div>
