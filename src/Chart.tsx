@@ -28,6 +28,11 @@ type Trendline = {
   end: Point;
 };
 
+type Rectangle = {
+  start: Point;
+  end: Point;
+};
+
 type Props = {
   data: Candle[];
   symbol: string;
@@ -67,6 +72,7 @@ export default function Chart({
   const drawStartRef = useRef<Point | null>(null);
   const drawPreviewRef = useRef<Point | null>(null);
   const trendlinesRef = useRef<Trendline[]>([]);
+  const rectanglesRef = useRef<Rectangle[]>([]);
 
   const [drawingStep, setDrawingStep] = useState<"none" | "started" | "finished">("none");
 
@@ -113,8 +119,8 @@ export default function Chart({
       ctx.stroke();
     }
 
-    // Live preview line
-    if (drawStartRef.current && drawPreviewRef.current) {
+    // Live preview trendline
+    if (toolRef.current === "trendline" && drawStartRef.current && drawPreviewRef.current) {
       const s = toXY(drawStartRef.current);
       const e = toXY(drawPreviewRef.current);
       if (s && e) {
@@ -124,6 +130,48 @@ export default function Chart({
         ctx.moveTo(s.x, s.y);
         ctx.lineTo(e.x, e.y);
         ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.restore();
+
+    // Committed rectangles
+    ctx.save();
+    ctx.strokeStyle = "#f5a623";
+    ctx.fillStyle = "rgba(245, 166, 35, 0.15)";
+    ctx.lineWidth = 2 * dpr;
+    for (const rect of rectanglesRef.current) {
+      const s = toXY(rect.start);
+      const e = toXY(rect.end);
+      if (!s || !e) continue;
+      const x = Math.min(s.x, e.x);
+      const y = Math.min(s.y, e.y);
+      const w = Math.abs(e.x - s.x);
+      const h = Math.abs(e.y - s.y);
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    // Live preview rectangle
+    if (toolRef.current === "rectangle" && drawStartRef.current && drawPreviewRef.current) {
+      const s = toXY(drawStartRef.current);
+      const e = toXY(drawPreviewRef.current);
+      if (s && e) {
+        const x = Math.min(s.x, e.x);
+        const y = Math.min(s.y, e.y);
+        const w = Math.abs(e.x - s.x);
+        const h = Math.abs(e.y - s.y);
+        ctx.setLineDash([6 * dpr, 4 * dpr]);
+        ctx.globalAlpha = 0.8;
+        ctx.beginPath();
+        ctx.rect(x, y, w, h);
+        ctx.fill();
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
       }
     }
     ctx.restore();
@@ -155,11 +203,13 @@ export default function Chart({
     drawOverlay();
   }, [drawOverlay]);
 
+  // Always reset in-progress drawing when the active tool changes.
+  // Critical: switching between drawing tools (trendline ↔ rectangle) must
+  // also clear drawStartRef, otherwise the next click is wrongly treated as
+  // the SECOND click of a new shape.
   useEffect(() => {
-    if (tool !== "trendline") {
-      clearDrawing();
-      setDrawingStep("none");
-    }
+    clearDrawing();
+    setDrawingStep("none");
   }, [tool, clearDrawing]);
 
   // ── CHART SETUP ───────────────────────────────────────────────────────────
@@ -170,6 +220,7 @@ export default function Chart({
 
     hasInitialData.current = false;
     trendlinesRef.current = [];
+    rectanglesRef.current = [];
     drawStartRef.current = null;
     drawPreviewRef.current = null;
     setDrawingStep("none");
@@ -252,7 +303,11 @@ export default function Chart({
         const point = getPoint(param);
         if (point) onCrosshairMove?.(point.time as number);
 
-        if (toolRef.current === "trendline" && drawStartRef.current && point) {
+        if (
+          (toolRef.current === "trendline" || toolRef.current === "rectangle") &&
+          drawStartRef.current &&
+          point
+        ) {
           drawPreviewRef.current = point;
           drawOverlay();
         }
@@ -264,7 +319,9 @@ export default function Chart({
 
     const handleClick = (param: MouseEventParams<Time>) => {
       try {
-        if (toolRef.current !== "trendline") return;
+        const currentTool = toolRef.current;
+        if (currentTool !== "trendline" && currentTool !== "rectangle") return;
+
         const point = getPoint(param);
         if (!point) return;
 
@@ -273,8 +330,8 @@ export default function Chart({
           drawingStepTimeoutRef.current = null;
         }
 
+        // ── FIRST CLICK: set start ──
         if (!drawStartRef.current) {
-          // First click — set start point
           drawStartRef.current = point;
           drawPreviewRef.current = point;
           setDrawingStep("started");
@@ -282,14 +339,20 @@ export default function Chart({
           return;
         }
 
-        // Second click — skip if same timestamp
-        if (point.time === drawStartRef.current.time) return;
+        // ── SECOND CLICK: commit ──
+        if (currentTool === "trendline") {
+          if (point.time === drawStartRef.current.time) return; // same candle — ignore
+          trendlinesRef.current = [
+            ...trendlinesRef.current,
+            { start: drawStartRef.current, end: point },
+          ];
+        } else if (currentTool === "rectangle") {
+          rectanglesRef.current = [
+            ...rectanglesRef.current,
+            { start: drawStartRef.current, end: point },
+          ];
+        }
 
-        // Commit trendline
-        trendlinesRef.current = [
-          ...trendlinesRef.current,
-          { start: drawStartRef.current, end: point },
-        ];
         drawStartRef.current = null;
         drawPreviewRef.current = null;
         drawOverlay();
@@ -367,7 +430,7 @@ export default function Chart({
         }}
       />
 
-      {tool === "trendline" && (
+      {(tool === "trendline" || tool === "rectangle") && (
         <div
           style={{
             position: "absolute",
@@ -376,9 +439,11 @@ export default function Chart({
             padding: "4px 12px",
             background:
               drawingStep === "started"
-                ? "#4da3ff"
+                ? tool === "rectangle" ? "#f5a623" : "#4da3ff"
                 : drawingStep === "finished"
                 ? "#26a69a"
+                : tool === "rectangle"
+                ? "rgba(245, 166, 35, 0.3)"
                 : "rgba(77, 163, 255, 0.3)",
             color: "#fff",
             fontSize: "11px",
@@ -388,9 +453,9 @@ export default function Chart({
             pointerEvents: "none",
           }}
         >
-          {drawingStep === "none" && "Click to draw trendline"}
-          {drawingStep === "started" && "Click another point to finish"}
-          {drawingStep === "finished" && "✓ Trendline drawn"}
+          {drawingStep === "none" && (tool === "rectangle" ? "Click to draw rectangle" : "Click to draw trendline")}
+          {drawingStep === "started" && (tool === "rectangle" ? "Click opposite corner to finish" : "Click another point to finish")}
+          {drawingStep === "finished" && (tool === "rectangle" ? "✓ Rectangle drawn" : "✓ Trendline drawn")}
         </div>
       )}
     </div>

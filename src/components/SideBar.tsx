@@ -21,8 +21,9 @@ export default function Sidebar() {
   }) => (
     <div style={{ position: "relative" }}>
       <button
-        onClick={() => {
-          console.log("Sidebar click:", value);
+        onMouseDown={(e) => {
+          e.stopPropagation();
+          e.preventDefault();
           setTool(value);
         }}
           
