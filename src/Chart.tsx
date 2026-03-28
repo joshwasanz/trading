@@ -9,6 +9,8 @@ import {
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
+import { useToolStore } from "./store/useToolStore";
+import type { ChartDrawings, Point, Rectangle, Trendline } from "./types/drawings";
 
 type Candle = {
   time: number;
@@ -18,24 +20,8 @@ type Candle = {
   close: number;
 };
 
-type Point = {
-  time: UTCTimestamp;
-  price: number;
-};
-
-type Trendline = {
-  start: Point;
-  end: Point;
-};
-
-type Rectangle = {
-  start: Point;
-  end: Point;
-};
-
 type Props = {
   data: Candle[];
-  symbol: string;
   onCrosshairMove?: (time: number) => void;
   onTimeRangeChange?: (range: any, chartId: string) => void;
   externalRange?: any;
@@ -43,8 +29,68 @@ type Props = {
   setActiveChart?: (id: string) => void;
   rangeSource?: string | null;
   chartId: string;
+  seriesKey: string;
+  drawings: ChartDrawings;
+  onAddTrendline: (chartId: string, line: Trendline) => void;
+  onAddRectangle: (chartId: string, rect: Rectangle) => void;
   tool?: string | null;
 };
+
+type ScreenPoint = {
+  x: number;
+  y: number;
+};
+
+function getExtendedLine(
+  start: ScreenPoint,
+  end: ScreenPoint,
+  width: number,
+  height: number
+): { start: ScreenPoint; end: ScreenPoint } | null {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+
+  if (dx === 0 && dy === 0) return null;
+
+  const intersections: Array<{ point: ScreenPoint; t: number }> = [];
+
+  const pushIntersection = (x: number, y: number, t: number) => {
+    const duplicate = intersections.some(
+      ({ point }) => Math.abs(point.x - x) < 0.5 && Math.abs(point.y - y) < 0.5
+    );
+    if (!duplicate) {
+      intersections.push({ point: { x, y }, t });
+    }
+  };
+
+  if (dx !== 0) {
+    const leftT = (0 - start.x) / dx;
+    const leftY = start.y + leftT * dy;
+    if (leftY >= 0 && leftY <= height) pushIntersection(0, leftY, leftT);
+
+    const rightT = (width - start.x) / dx;
+    const rightY = start.y + rightT * dy;
+    if (rightY >= 0 && rightY <= height) pushIntersection(width, rightY, rightT);
+  }
+
+  if (dy !== 0) {
+    const topT = (0 - start.y) / dy;
+    const topX = start.x + topT * dx;
+    if (topX >= 0 && topX <= width) pushIntersection(topX, 0, topT);
+
+    const bottomT = (height - start.y) / dy;
+    const bottomX = start.x + bottomT * dx;
+    if (bottomX >= 0 && bottomX <= width) pushIntersection(bottomX, height, bottomT);
+  }
+
+  if (intersections.length < 2) return null;
+
+  intersections.sort((a, b) => a.t - b.t);
+  return {
+    start: intersections[0].point,
+    end: intersections[intersections.length - 1].point,
+  };
+}
 
 export default function Chart({
   data,
@@ -55,6 +101,10 @@ export default function Chart({
   setActiveChart,
   rangeSource,
   chartId,
+  seriesKey,
+  drawings,
+  onAddTrendline,
+  onAddRectangle,
   tool,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -63,23 +113,39 @@ export default function Chart({
   const overlayRef = useRef<HTMLCanvasElement>(null);
 
   const rangeTimeoutRef = useRef<number | null>(null);
-  const drawingStepTimeoutRef = useRef<number | null>(null);
+  const overlayFrameRef = useRef<number | null>(null);
   const hasInitialData = useRef(false);
   const activeChartRef = useRef<string | null>(null);
   const toolRef = useRef(tool);
+  const drawingsRef = useRef(drawings);
+  const onCrosshairMoveRef = useRef(onCrosshairMove);
+  const onTimeRangeChangeRef = useRef(onTimeRangeChange);
 
-  // Drawing data — stored in refs so no React re-render needed for canvas ops
   const drawStartRef = useRef<Point | null>(null);
   const drawPreviewRef = useRef<Point | null>(null);
-  const trendlinesRef = useRef<Trendline[]>([]);
-  const rectanglesRef = useRef<Rectangle[]>([]);
 
-  const [drawingStep, setDrawingStep] = useState<"none" | "started" | "finished">("none");
+  const setTool = useToolStore((state) => state.setTool);
+  const [drawingStep, setDrawingStep] = useState<"none" | "started">("none");
 
-  useEffect(() => { toolRef.current = tool; }, [tool]);
-  useEffect(() => { activeChartRef.current = activeChart ?? null; }, [activeChart]);
+  useEffect(() => {
+    toolRef.current = tool;
+  }, [tool]);
 
-  // ── CANVAS OVERLAY ────────────────────────────────────────────────────────
+  useEffect(() => {
+    activeChartRef.current = activeChart ?? null;
+  }, [activeChart]);
+
+  useEffect(() => {
+    drawingsRef.current = drawings;
+  }, [drawings]);
+
+  useEffect(() => {
+    onCrosshairMoveRef.current = onCrosshairMove;
+  }, [onCrosshairMove]);
+
+  useEffect(() => {
+    onTimeRangeChangeRef.current = onTimeRangeChange;
+  }, [onTimeRangeChange]);
 
   const drawOverlay = useCallback(() => {
     const canvas = overlayRef.current;
@@ -93,10 +159,10 @@ export default function Chart({
     const dpr = window.devicePixelRatio || 1;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const toXY = (p: Point): { x: number; y: number } | null => {
+    const toXY = (point: Point): ScreenPoint | null => {
       try {
-        const x = chart.timeScale().timeToCoordinate(p.time);
-        const y = series.priceToCoordinate(p.price);
+        const x = chart.timeScale().timeToCoordinate(point.time);
+        const y = series.priceToCoordinate(point.price);
         if (x === null || y === null) return null;
         return { x: x * dpr, y: y * dpr };
       } catch {
@@ -104,70 +170,78 @@ export default function Chart({
       }
     };
 
-    // Committed trendlines
     ctx.save();
     ctx.strokeStyle = "#4da3ff";
     ctx.lineWidth = 2 * dpr;
     ctx.lineCap = "round";
-    for (const line of trendlinesRef.current) {
-      const s = toXY(line.start);
-      const e = toXY(line.end);
-      if (!s || !e) continue;
+
+    for (const line of drawingsRef.current.trendlines) {
+      const start = toXY(line.start);
+      const end = toXY(line.end);
+      if (!start || !end) continue;
+
+      const extended = getExtendedLine(start, end, canvas.width, canvas.height);
+      if (!extended) continue;
+
       ctx.beginPath();
-      ctx.moveTo(s.x, s.y);
-      ctx.lineTo(e.x, e.y);
+      ctx.moveTo(extended.start.x, extended.start.y);
+      ctx.lineTo(extended.end.x, extended.end.y);
       ctx.stroke();
     }
 
-    // Live preview trendline
     if (toolRef.current === "trendline" && drawStartRef.current && drawPreviewRef.current) {
-      const s = toXY(drawStartRef.current);
-      const e = toXY(drawPreviewRef.current);
-      if (s && e) {
-        ctx.setLineDash([6 * dpr, 4 * dpr]);
-        ctx.globalAlpha = 0.8;
-        ctx.beginPath();
-        ctx.moveTo(s.x, s.y);
-        ctx.lineTo(e.x, e.y);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.globalAlpha = 1;
+      const start = toXY(drawStartRef.current);
+      const end = toXY(drawPreviewRef.current);
+      if (start && end) {
+        const extended = getExtendedLine(start, end, canvas.width, canvas.height);
+        if (extended) {
+          ctx.setLineDash([6 * dpr, 4 * dpr]);
+          ctx.globalAlpha = 0.8;
+          ctx.beginPath();
+          ctx.moveTo(extended.start.x, extended.start.y);
+          ctx.lineTo(extended.end.x, extended.end.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 1;
+        }
       }
     }
     ctx.restore();
 
-    // Committed rectangles
     ctx.save();
     ctx.strokeStyle = "#f5a623";
     ctx.fillStyle = "rgba(245, 166, 35, 0.15)";
     ctx.lineWidth = 2 * dpr;
-    for (const rect of rectanglesRef.current) {
-      const s = toXY(rect.start);
-      const e = toXY(rect.end);
-      if (!s || !e) continue;
-      const x = Math.min(s.x, e.x);
-      const y = Math.min(s.y, e.y);
-      const w = Math.abs(e.x - s.x);
-      const h = Math.abs(e.y - s.y);
+
+    for (const rect of drawingsRef.current.rectangles) {
+      const start = toXY(rect.start);
+      const end = toXY(rect.end);
+      if (!start || !end) continue;
+
+      const x = Math.min(start.x, end.x);
+      const y = Math.min(start.y, end.y);
+      const width = Math.abs(end.x - start.x);
+      const height = Math.abs(end.y - start.y);
+
       ctx.beginPath();
-      ctx.rect(x, y, w, h);
+      ctx.rect(x, y, width, height);
       ctx.fill();
       ctx.stroke();
     }
 
-    // Live preview rectangle
     if (toolRef.current === "rectangle" && drawStartRef.current && drawPreviewRef.current) {
-      const s = toXY(drawStartRef.current);
-      const e = toXY(drawPreviewRef.current);
-      if (s && e) {
-        const x = Math.min(s.x, e.x);
-        const y = Math.min(s.y, e.y);
-        const w = Math.abs(e.x - s.x);
-        const h = Math.abs(e.y - s.y);
+      const start = toXY(drawStartRef.current);
+      const end = toXY(drawPreviewRef.current);
+      if (start && end) {
+        const x = Math.min(start.x, end.x);
+        const y = Math.min(start.y, end.y);
+        const width = Math.abs(end.x - start.x);
+        const height = Math.abs(end.y - start.y);
+
         ctx.setLineDash([6 * dpr, 4 * dpr]);
         ctx.globalAlpha = 0.8;
         ctx.beginPath();
-        ctx.rect(x, y, w, h);
+        ctx.rect(x, y, width, height);
         ctx.fill();
         ctx.stroke();
         ctx.setLineDash([]);
@@ -177,50 +251,55 @@ export default function Chart({
     ctx.restore();
   }, []);
 
+  const scheduleOverlayDraw = useCallback(() => {
+    if (overlayFrameRef.current !== null) return;
+
+    overlayFrameRef.current = window.requestAnimationFrame(() => {
+      overlayFrameRef.current = null;
+      drawOverlay();
+    });
+  }, [drawOverlay]);
+
   const syncOverlaySize = useCallback(() => {
     const canvas = overlayRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
-    const dpr = window.devicePixelRatio || 1;
-    const w = container.clientWidth;
-    const h = container.clientHeight;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    canvas.style.width = w + "px";
-    canvas.style.height = h + "px";
-    drawOverlay();
-  }, [drawOverlay]);
 
-  // ── DRAWING STATE ─────────────────────────────────────────────────────────
+    const dpr = window.devicePixelRatio || 1;
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + "px";
+    canvas.style.height = height + "px";
+
+    scheduleOverlayDraw();
+  }, [scheduleOverlayDraw]);
 
   const clearDrawing = useCallback(() => {
-    if (drawingStepTimeoutRef.current !== null) {
-      window.clearTimeout(drawingStepTimeoutRef.current);
-      drawingStepTimeoutRef.current = null;
-    }
     drawStartRef.current = null;
     drawPreviewRef.current = null;
-    drawOverlay();
-  }, [drawOverlay]);
+    scheduleOverlayDraw();
+  }, [scheduleOverlayDraw]);
 
-  // Always reset in-progress drawing when the active tool changes.
-  // Critical: switching between drawing tools (trendline ↔ rectangle) must
-  // also clear drawStartRef, otherwise the next click is wrongly treated as
-  // the SECOND click of a new shape.
   useEffect(() => {
     clearDrawing();
     setDrawingStep("none");
   }, [tool, clearDrawing]);
 
-  // ── CHART SETUP ───────────────────────────────────────────────────────────
+  useEffect(() => {
+    hasInitialData.current = false;
+    drawStartRef.current = null;
+    drawPreviewRef.current = null;
+    setDrawingStep("none");
+  }, [seriesKey]);
 
   useEffect(() => {
     if (!containerRef.current) return;
     const container = containerRef.current;
 
     hasInitialData.current = false;
-    trendlinesRef.current = [];
-    rectanglesRef.current = [];
     drawStartRef.current = null;
     drawPreviewRef.current = null;
     setDrawingStep("none");
@@ -256,7 +335,7 @@ export default function Chart({
     const handleMouseDown = () => setActiveChart?.(chartId);
     container.addEventListener("mousedown", handleMouseDown);
 
-    requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
       chart.resize(container.clientWidth, container.clientHeight);
       syncOverlaySize();
     });
@@ -274,14 +353,12 @@ export default function Chart({
       const timeFromCoord = chart.timeScale().coordinateToTime(param.point.x);
       const price = series.coordinateToPrice(param.point.y);
 
-      // Prefer the snapped candle time; fall back to interpolated coordinate time.
-      // Both are checked explicitly — coordinateToTime can return BusinessDay or null.
       const time =
         typeof timeFromEvent === "number"
           ? timeFromEvent
           : typeof timeFromCoord === "number"
-          ? timeFromCoord
-          : null;
+            ? timeFromCoord
+            : null;
 
       if (time === null || price === null) return null;
 
@@ -289,11 +366,15 @@ export default function Chart({
     };
 
     const handleVisibleRangeChange = (range: any) => {
-      drawOverlay(); // redraw lines when chart pans/zooms
+      scheduleOverlayDraw();
       if (!range || activeChartRef.current !== chartId) return;
-      if (rangeTimeoutRef.current !== null) window.clearTimeout(rangeTimeoutRef.current);
+
+      if (rangeTimeoutRef.current !== null) {
+        window.clearTimeout(rangeTimeoutRef.current);
+      }
+
       rangeTimeoutRef.current = window.setTimeout(() => {
-        onTimeRangeChange?.(range, chartId);
+        onTimeRangeChangeRef.current?.(range, chartId);
       }, 60);
     };
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
@@ -301,7 +382,9 @@ export default function Chart({
     const handleCrosshairMove = (param: MouseEventParams<Time>) => {
       try {
         const point = getPoint(param);
-        if (point) onCrosshairMove?.(point.time as number);
+        if (point) {
+          onCrosshairMoveRef.current?.(point.time as number);
+        }
 
         if (
           (toolRef.current === "trendline" || toolRef.current === "rectangle") &&
@@ -309,10 +392,10 @@ export default function Chart({
           point
         ) {
           drawPreviewRef.current = point;
-          drawOverlay();
+          scheduleOverlayDraw();
         }
-      } catch (err) {
-        console.error("[Chart] crosshairMove error:", err);
+      } catch (error) {
+        console.error("[Chart] crosshairMove error:", error);
       }
     };
     chart.subscribeCrosshairMove(handleCrosshairMove);
@@ -325,49 +408,34 @@ export default function Chart({
         const point = getPoint(param);
         if (!point) return;
 
-        if (drawingStepTimeoutRef.current !== null) {
-          window.clearTimeout(drawingStepTimeoutRef.current);
-          drawingStepTimeoutRef.current = null;
-        }
-
-        // ── FIRST CLICK: set start ──
         if (!drawStartRef.current) {
           drawStartRef.current = point;
           drawPreviewRef.current = point;
           setDrawingStep("started");
-          drawOverlay();
+          scheduleOverlayDraw();
           return;
         }
 
-        // ── SECOND CLICK: commit ──
+        const start = drawStartRef.current;
+
         if (currentTool === "trendline") {
-          if (point.time === drawStartRef.current.time) return; // same candle — ignore
-          trendlinesRef.current = [
-            ...trendlinesRef.current,
-            { start: drawStartRef.current, end: point },
-          ];
-        } else if (currentTool === "rectangle") {
-          rectanglesRef.current = [
-            ...rectanglesRef.current,
-            { start: drawStartRef.current, end: point },
-          ];
+          if (point.time === start.time) return;
+          onAddTrendline(chartId, { start, end: point });
+        } else {
+          onAddRectangle(chartId, { start, end: point });
         }
 
         drawStartRef.current = null;
         drawPreviewRef.current = null;
-        drawOverlay();
-
-        setDrawingStep("finished");
-        drawingStepTimeoutRef.current = window.setTimeout(() => {
-          setDrawingStep("none");
-          drawingStepTimeoutRef.current = null;
-        }, 1000);
-      } catch (err) {
-        console.error("[Chart] click error:", err);
+        setDrawingStep("none");
+        scheduleOverlayDraw();
+        setTool("none");
+      } catch (error) {
+        console.error("[Chart] click error:", error);
         drawStartRef.current = null;
         drawPreviewRef.current = null;
-        drawOverlay();
         setDrawingStep("none");
+        scheduleOverlayDraw();
       }
     };
     chart.subscribeClick(handleClick);
@@ -377,48 +445,62 @@ export default function Chart({
       chart.unsubscribeClick(handleClick);
       chart.unsubscribeCrosshairMove(handleCrosshairMove);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
-      if (rangeTimeoutRef.current !== null) window.clearTimeout(rangeTimeoutRef.current);
-      if (drawingStepTimeoutRef.current !== null) window.clearTimeout(drawingStepTimeoutRef.current);
+
+      if (rangeTimeoutRef.current !== null) {
+        window.clearTimeout(rangeTimeoutRef.current);
+      }
+
+      if (overlayFrameRef.current !== null) {
+        window.cancelAnimationFrame(overlayFrameRef.current);
+      }
+
       resizeObserver.disconnect();
       chart.remove();
+
       if (chartRef.current === chart) chartRef.current = null;
       if (seriesRef.current === series) seriesRef.current = null;
     };
-  }, [chartId, drawOverlay, syncOverlaySize]);
-
-  // ── DATA ──────────────────────────────────────────────────────────────────
+  }, [chartId, onAddRectangle, onAddTrendline, scheduleOverlayDraw, setActiveChart, setTool, syncOverlaySize]);
 
   useEffect(() => {
-    if (!seriesRef.current || !chartRef.current || !data?.length) return;
+    if (!seriesRef.current || !chartRef.current) return;
+
     try {
-      seriesRef.current.setData(
-        data.map((c) => ({ ...c, time: c.time as UTCTimestamp })) as CandlestickData<Time>[]
-      );
-      if (!hasInitialData.current) {
+      const nextData = data.map((candle) => ({
+        ...candle,
+        time: candle.time as UTCTimestamp,
+      })) as CandlestickData<Time>[];
+      seriesRef.current.setData(nextData);
+
+      if (!hasInitialData.current && nextData.length > 0) {
         hasInitialData.current = true;
         chartRef.current.timeScale().fitContent();
       }
-    } catch (err) {
-      console.error("[Chart] setData error:", err);
+
+      scheduleOverlayDraw();
+    } catch (error) {
+      console.error("[Chart] setData error:", error);
     }
-  }, [data]);
+  }, [data, scheduleOverlayDraw]);
 
   useEffect(() => {
     if (!chartRef.current || !externalRange || rangeSource === chartId) return;
+
     try {
       chartRef.current.timeScale().setVisibleLogicalRange(externalRange);
-    } catch (err) {
-      console.error("[Chart] setVisibleLogicalRange error:", err);
+    } catch (error) {
+      console.error("[Chart] setVisibleLogicalRange error:", error);
     }
   }, [externalRange, rangeSource, chartId]);
 
-  // ── RENDER ────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    scheduleOverlayDraw();
+  }, [drawings, scheduleOverlayDraw]);
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
       <div ref={containerRef} className="chart-canvas" />
 
-      {/* Trendline canvas overlay — pointer-events:none so chart receives all mouse events */}
       <canvas
         ref={overlayRef}
         style={{
@@ -439,12 +521,12 @@ export default function Chart({
             padding: "4px 12px",
             background:
               drawingStep === "started"
-                ? tool === "rectangle" ? "#f5a623" : "#4da3ff"
-                : drawingStep === "finished"
-                ? "#26a69a"
+                ? tool === "rectangle"
+                  ? "#f5a623"
+                  : "#4da3ff"
                 : tool === "rectangle"
-                ? "rgba(245, 166, 35, 0.3)"
-                : "rgba(77, 163, 255, 0.3)",
+                  ? "rgba(245, 166, 35, 0.3)"
+                  : "rgba(77, 163, 255, 0.3)",
             color: "#fff",
             fontSize: "11px",
             borderRadius: "3px",
@@ -455,7 +537,6 @@ export default function Chart({
         >
           {drawingStep === "none" && (tool === "rectangle" ? "Click to draw rectangle" : "Click to draw trendline")}
           {drawingStep === "started" && (tool === "rectangle" ? "Click opposite corner to finish" : "Click another point to finish")}
-          {drawingStep === "finished" && (tool === "rectangle" ? "✓ Rectangle drawn" : "✓ Trendline drawn")}
         </div>
       )}
     </div>

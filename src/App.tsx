@@ -18,17 +18,56 @@ type Candle = {
 
 type Timeframe = "15s" | "1m" | "3m";
 
-// 🔥 INITIAL DATA PER SYMBOL + TF
+const DATA_STORAGE_KEY = "chart-data-v1";
+
+function createEmptyTimeframeData(): Record<Timeframe, Candle[]> {
+  return { "15s": [], "1m": [], "3m": [] };
+}
+
 const initialDataState: Record<string, Record<Timeframe, Candle[]>> = {
-  nq: { "15s": [], "1m": [], "3m": [] },
-  es: { "15s": [], "1m": [], "3m": [] },
+  nq: createEmptyTimeframeData(),
+  es: createEmptyTimeframeData(),
 };
 
 let startStreamsPromise: Promise<void> | null = null;
 
-// ==================== UPSERT ====================
+function readStoredData(): Record<string, Record<Timeframe, Candle[]>> {
+  if (typeof window === "undefined") return initialDataState;
+
+  try {
+    const stored = window.localStorage.getItem(DATA_STORAGE_KEY);
+    if (!stored) return initialDataState;
+
+    const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return initialDataState;
+    }
+
+    const merged: Record<string, Record<Timeframe, Candle[]>> = {
+      nq: createEmptyTimeframeData(),
+      es: createEmptyTimeframeData(),
+    };
+
+    for (const [symbol, maybeSeries] of Object.entries(parsed as Record<string, unknown>)) {
+      const series = maybeSeries as Partial<Record<Timeframe, Candle[]>>;
+      const current = merged[symbol] ?? createEmptyTimeframeData();
+
+      merged[symbol] = {
+        "15s": Array.isArray(series["15s"]) ? series["15s"] : current["15s"],
+        "1m": Array.isArray(series["1m"]) ? series["1m"] : current["1m"],
+        "3m": Array.isArray(series["3m"]) ? series["3m"] : current["3m"],
+      };
+    }
+
+    return merged;
+  } catch (error) {
+    console.error("[App] Failed to read cached data:", error);
+    return initialDataState;
+  }
+}
+
 function upsertCandleSeries(current: Candle[], incoming: Candle): Candle[] {
-  const MAX = 500; // 🔥 prevent memory bloat
+  const maxCandles = 500;
 
   if (current.length === 0) return [incoming];
 
@@ -42,18 +81,16 @@ function upsertCandleSeries(current: Candle[], incoming: Candle): Candle[] {
     next[lastIndex] = incoming;
   }
 
-  // 🔥 LIMIT SIZE
-  if (next.length > MAX) {
-    next.splice(0, next.length - MAX);
+  if (next.length > maxCandles) {
+    next.splice(0, next.length - maxCandles);
   }
 
   return next;
 }
 
-// ==================== APP ====================
 function AppInner() {
-  const [data, setData] = useState(initialDataState);
-  const dataRef = useRef(initialDataState);
+  const [data, setData] = useState(() => readStoredData());
+  const dataRef = useRef(data);
 
   const [crosshairTime, setCrosshairTime] = useState<number | null>(null);
   const [timeRange, setTimeRange] = useState<any>(null);
@@ -61,10 +98,16 @@ function AppInner() {
   const [activeChart, setActiveChart] = useState<string | null>(null);
   const [layoutType, setLayoutType] = useState("2");
 
-  // 🔥 TOOL ENGINE
-  const { tool } = useToolStore();
+  const tool = useToolStore((state) => state.tool);
 
-  // ==================== STREAM SETUP ====================
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(DATA_STORAGE_KEY, JSON.stringify(data));
+    } catch (error) {
+      console.error("[App] Failed to cache chart data:", error);
+    }
+  }, [data]);
+
   useEffect(() => {
     let cancelled = false;
     const unlisteners: Array<() => void> = [];
@@ -103,11 +146,11 @@ function AppInner() {
     async function setup() {
       try {
         const symbols = ["nq", "es"];
-        const tfs: Timeframe[] = ["15s", "1m", "3m"];
+        const timeframes: Timeframe[] = ["15s", "1m", "3m"];
 
-        for (const s of symbols) {
-          for (const tf of tfs) {
-            await register(s, tf);
+        for (const symbol of symbols) {
+          for (const timeframe of timeframes) {
+            await register(symbol, timeframe);
           }
         }
 
@@ -116,8 +159,8 @@ function AppInner() {
         }
 
         await startStreamsPromise;
-      } catch (err) {
-        console.error("Stream init error:", err);
+      } catch (error) {
+        console.error("Stream init error:", error);
       }
     }
 
@@ -125,30 +168,19 @@ function AppInner() {
 
     return () => {
       cancelled = true;
-      unlisteners.forEach((u) => u());
+      unlisteners.forEach((unlisten) => unlisten());
     };
   }, []);
 
-
-  // ==================== UI ====================
   return (
     <div className="app-shell">
-
-      {/* 🔥 TOOLBAR */}
       <div className="app-shell__toolbar">
-        <TopBar
-          layoutType={layoutType}
-          setLayoutType={setLayoutType}
-        />
+        <TopBar layoutType={layoutType} setLayoutType={setLayoutType} />
       </div>
 
-      {/* 🔥 MAIN AREA (SIDEBAR + CHARTS) */}
       <div style={{ display: "flex", height: "100%" }}>
-
-        {/* 🔥 SIDEBAR */}
         <Sidebar />
 
-        {/* 🔥 CHART AREA */}
         <div className="app-shell__viewport" style={{ flex: 1 }}>
           <LayoutManager
             data={data}
@@ -161,14 +193,11 @@ function AppInner() {
             setTimeRange={setTimeRange}
             rangeSource={rangeSource}
             setRangeSource={setRangeSource}
-            tool={tool} // 🔥 CRITICAL
+            tool={tool}
           />
         </div>
-
       </div>
     </div>
-
-   
   );
 }
 

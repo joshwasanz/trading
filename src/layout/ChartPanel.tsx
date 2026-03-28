@@ -1,11 +1,16 @@
 import Chart from "../Chart";
+import type { ChartDrawings, Rectangle, Trendline } from "../types/drawings";
 
 type Timeframe = "15s" | "1m" | "3m";
 
 type Props = {
+  panelId: string;
   symbol: string;
   timeframe: Timeframe;
   data: any[];
+  drawings: ChartDrawings;
+  onAddTrendline: (chartId: string, line: Trendline) => void;
+  onAddRectangle: (chartId: string, rect: Rectangle) => void;
   onFocus: () => void;
   onSymbolChange?: (symbol: string) => void;
   onTimeframeChange?: (tf: Timeframe) => void;
@@ -15,13 +20,17 @@ type Props = {
   onTimeRangeChange?: (range: any, chartId: string) => void;
   externalRange?: any;
   rangeSource?: string | null;
-  tool?: string | null; // 🔥 ADDED
+  tool?: string | null;
 };
 
 export default function ChartPanel({
+  panelId,
   symbol,
   timeframe,
   data,
+  drawings,
+  onAddTrendline,
+  onAddRectangle,
   onFocus,
   onSymbolChange,
   onTimeframeChange,
@@ -31,9 +40,9 @@ export default function ChartPanel({
   onTimeRangeChange,
   externalRange,
   rangeSource,
-  tool, // 🔥 ADDED
+  tool,
 }: Props) {
-  const chartId = `${symbol}_${timeframe}`;
+  const chartId = panelId;
 
   return (
     <div className="chart-panel">
@@ -67,16 +76,19 @@ export default function ChartPanel({
 
       <div className="chart-panel__body">
         <Chart
-          symbol={symbol}
           data={data}
           chartId={chartId}
+          seriesKey={`${symbol}_${timeframe}`}
+          drawings={drawings}
+          onAddTrendline={onAddTrendline}
+          onAddRectangle={onAddRectangle}
           activeChart={activeChart}
           setActiveChart={setActiveChart}
           onCrosshairMove={onCrosshairMove}
           onTimeRangeChange={onTimeRangeChange}
           externalRange={externalRange}
           rangeSource={rangeSource}
-          tool={tool} // 🔥 FIXED — was missing before
+          tool={tool}
         />
       </div>
     </div>

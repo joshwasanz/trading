@@ -1,5 +1,12 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import ChartPanel from "./ChartPanel";
+import {
+  EMPTY_CHART_DRAWINGS,
+  type ChartDrawings,
+  type DrawingsState,
+  type Rectangle,
+  type Trendline,
+} from "../types/drawings";
 
 type Timeframe = "15s" | "1m" | "3m";
 
@@ -18,12 +25,32 @@ const DEFAULT_PANELS: Panel[] = [
   { id: "F", symbol: "dxy", timeframe: "1m" },
 ];
 
+const DRAWINGS_STORAGE_KEY = "layout-manager-drawings-v1";
+
+function readStoredDrawings(): DrawingsState {
+  if (typeof window === "undefined") return {};
+
+  try {
+    const stored = window.localStorage.getItem(DRAWINGS_STORAGE_KEY);
+    if (!stored) return {};
+
+    const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+
+    return parsed as DrawingsState;
+  } catch (error) {
+    console.error("[LayoutManager] Failed to read drawings:", error);
+    return {};
+  }
+}
+
 export default function LayoutManager({
   data,
   layoutType,
   activeChart,
   setActiveChart,
-  crosshairTime,
   setCrosshairTime,
   timeRange,
   setTimeRange,
@@ -35,14 +62,22 @@ export default function LayoutManager({
   const [hSplit, setHSplit] = useState(0.5);
   const [panels, setPanels] = useState<Panel[]>(DEFAULT_PANELS);
   const [focused, setFocused] = useState<string | null>(null);
+  const [drawingsByChart, setDrawingsByChart] = useState<DrawingsState>(() => readStoredDrawings());
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(DRAWINGS_STORAGE_KEY, JSON.stringify(drawingsByChart));
+    } catch (error) {
+      console.error("[LayoutManager] Failed to save drawings:", error);
+    }
+  }, [drawingsByChart]);
 
   const sharedProps = {
     activeChart,
     setActiveChart,
-    onCrosshairMove: (t: number) => setCrosshairTime(t),
-    externalTime: crosshairTime,
-    onTimeRangeChange: (r: any, sourceChartId: string) => {
-      setTimeRange(r);
+    onCrosshairMove: (time: number) => setCrosshairTime(time),
+    onTimeRangeChange: (range: any, sourceChartId: string) => {
+      setTimeRange(range);
       setRangeSource(sourceChartId);
     },
     externalRange: timeRange,
@@ -50,16 +85,66 @@ export default function LayoutManager({
     tool,
   };
 
-  // ==================== PANEL UPDATE ====================
-  const updatePanel = (id: string, updates: Partial<Panel>) => {
-    setPanels((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, ...updates } : p))
-    );
-  };
+  const updatePanel = useCallback((id: string, updates: Partial<Panel>) => {
+    setPanels((prev) => prev.map((panel) => (panel.id === id ? { ...panel, ...updates } : panel)));
+  }, []);
 
-  const getPanel = (id: string) => panels.find((p) => p.id === id)!;
+  const getPanel = useCallback((id: string) => panels.find((panel) => panel.id === id)!, [panels]);
 
-  // ==================== RESIZE ====================
+  const getChartDrawings = useCallback(
+    (chartId: string): ChartDrawings => drawingsByChart[chartId] ?? EMPTY_CHART_DRAWINGS,
+    [drawingsByChart]
+  );
+
+  const updateChartDrawings = useCallback(
+    (chartId: string, updater: (current: ChartDrawings) => ChartDrawings) => {
+      setDrawingsByChart((prev) => {
+        const current = prev[chartId] ?? EMPTY_CHART_DRAWINGS;
+        return {
+          ...prev,
+          [chartId]: updater(current),
+        };
+      });
+    },
+    []
+  );
+
+  const handleAddTrendline = useCallback(
+    (chartId: string, line: Trendline) => {
+      updateChartDrawings(chartId, (current) => ({
+        trendlines: [...current.trendlines, line],
+        rectangles: current.rectangles,
+      }));
+    },
+    [updateChartDrawings]
+  );
+
+  const handleAddRectangle = useCallback(
+    (chartId: string, rect: Rectangle) => {
+      updateChartDrawings(chartId, (current) => ({
+        trendlines: current.trendlines,
+        rectangles: [...current.rectangles, rect],
+      }));
+    },
+    [updateChartDrawings]
+  );
+
+  const renderPanel = (panel: Panel, onFocus: () => void) => (
+    <ChartPanel
+      panelId={panel.id}
+      symbol={panel.symbol}
+      timeframe={panel.timeframe}
+      data={data[panel.symbol]?.[panel.timeframe] || []}
+      drawings={getChartDrawings(panel.id)}
+      onAddTrendline={handleAddTrendline}
+      onAddRectangle={handleAddRectangle}
+      onFocus={onFocus}
+      onSymbolChange={(symbol) => updatePanel(panel.id, { symbol })}
+      onTimeframeChange={(timeframe) => updatePanel(panel.id, { timeframe })}
+      {...sharedProps}
+    />
+  );
+
   const startVerticalResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const onMove = (ev: MouseEvent) => {
@@ -86,7 +171,6 @@ export default function LayoutManager({
     window.addEventListener("mouseup", onUp);
   };
 
-  // ==================== FOCUS MODE ====================
   if (focused) {
     const panel = getPanel(focused);
     return (
@@ -94,48 +178,21 @@ export default function LayoutManager({
         <div className="focus-mode__header">
           <button onClick={() => setFocused(null)}>← Back</button>
         </div>
-        <div className="focus-mode__content">
-          <ChartPanel
-            symbol={panel.symbol}
-            timeframe={panel.timeframe}
-            data={data[panel.symbol]?.[panel.timeframe] || []}
-            onFocus={() => setFocused(null)}
-            onSymbolChange={(s) => updatePanel(focused, { symbol: s })}
-            onTimeframeChange={(tf) => updatePanel(focused, { timeframe: tf })}
-            {...sharedProps}
-          />
-        </div>
+        <div className="focus-mode__content">{renderPanel(panel, () => setFocused(null))}</div>
       </div>
     );
   }
 
-  // ==================== 2 PANEL ====================
   if (layoutType === "2") {
     const [p0, p1] = panels;
     return (
       <div className="layout-engine">
         <div style={{ position: "absolute", left: 0, top: 0, width: `${vSplit * 100}%`, height: "100%" }}>
-          <ChartPanel
-            symbol={p0.symbol}
-            timeframe={p0.timeframe}
-            data={data[p0.symbol]?.[p0.timeframe] || []}
-            onFocus={() => setFocused(p0.id)}
-            onSymbolChange={(s) => updatePanel(p0.id, { symbol: s })}
-            onTimeframeChange={(tf) => updatePanel(p0.id, { timeframe: tf })}
-            {...sharedProps}
-          />
+          {renderPanel(p0, () => setFocused(p0.id))}
         </div>
 
         <div style={{ position: "absolute", left: `${vSplit * 100}%`, top: 0, width: `${(1 - vSplit) * 100}%`, height: "100%" }}>
-          <ChartPanel
-            symbol={p1.symbol}
-            timeframe={p1.timeframe}
-            data={data[p1.symbol]?.[p1.timeframe] || []}
-            onFocus={() => setFocused(p1.id)}
-            onSymbolChange={(s) => updatePanel(p1.id, { symbol: s })}
-            onTimeframeChange={(tf) => updatePanel(p1.id, { timeframe: tf })}
-            {...sharedProps}
-          />
+          {renderPanel(p1, () => setFocused(p1.id))}
         </div>
 
         <div
@@ -146,45 +203,20 @@ export default function LayoutManager({
     );
   }
 
-  // ==================== 3 PANEL ====================
   if (layoutType === "3") {
     const [p0, p1, p2] = panels;
     return (
       <div className="layout-engine">
         <div style={{ position: "absolute", left: 0, top: 0, width: `${vSplit * 100}%`, height: "100%" }}>
-          <ChartPanel
-            symbol={p0.symbol}
-            timeframe={p0.timeframe}
-            data={data[p0.symbol]?.[p0.timeframe] || []}
-            onFocus={() => setFocused(p0.id)}
-            onSymbolChange={(s) => updatePanel(p0.id, { symbol: s })}
-            onTimeframeChange={(tf) => updatePanel(p0.id, { timeframe: tf })}
-            {...sharedProps}
-          />
+          {renderPanel(p0, () => setFocused(p0.id))}
         </div>
 
         <div style={{ position: "absolute", left: `${vSplit * 100}%`, top: 0, width: `${(1 - vSplit) * 100}%`, height: `${hSplit * 100}%` }}>
-          <ChartPanel
-            symbol={p1.symbol}
-            timeframe={p1.timeframe}
-            data={data[p1.symbol]?.[p1.timeframe] || []}
-            onFocus={() => setFocused(p1.id)}
-            onSymbolChange={(s) => updatePanel(p1.id, { symbol: s })}
-            onTimeframeChange={(tf) => updatePanel(p1.id, { timeframe: tf })}
-            {...sharedProps}
-          />
+          {renderPanel(p1, () => setFocused(p1.id))}
         </div>
 
         <div style={{ position: "absolute", left: `${vSplit * 100}%`, top: `${hSplit * 100}%`, width: `${(1 - vSplit) * 100}%`, height: `${(1 - hSplit) * 100}%` }}>
-          <ChartPanel
-            symbol={p2.symbol}
-            timeframe={p2.timeframe}
-            data={data[p2.symbol]?.[p2.timeframe] || []}
-            onFocus={() => setFocused(p2.id)}
-            onSymbolChange={(s) => updatePanel(p2.id, { symbol: s })}
-            onTimeframeChange={(tf) => updatePanel(p2.id, { timeframe: tf })}
-            {...sharedProps}
-          />
+          {renderPanel(p2, () => setFocused(p2.id))}
         </div>
 
         <div onMouseDown={startVerticalResize} style={{ position: "absolute", left: `${vSplit * 100}%`, top: 0, width: "6px", height: "100%", cursor: "col-resize", transform: "translateX(-3px)", zIndex: 50 }} />
@@ -193,7 +225,6 @@ export default function LayoutManager({
     );
   }
 
-  // ==================== 6 PANEL ====================
   if (layoutType === "6") {
     return (
       <div className="layout-engine">
@@ -208,15 +239,7 @@ export default function LayoutManager({
               height: "50%",
             }}
           >
-            <ChartPanel
-              symbol={panel.symbol}
-              timeframe={panel.timeframe}
-              data={data[panel.symbol]?.[panel.timeframe] || []}
-              onFocus={() => setFocused(panel.id)}
-              onSymbolChange={(s) => updatePanel(panel.id, { symbol: s })}
-              onTimeframeChange={(tf) => updatePanel(panel.id, { timeframe: tf })}
-              {...sharedProps}
-            />
+            {renderPanel(panel, () => setFocused(panel.id))}
           </div>
         ))}
       </div>
