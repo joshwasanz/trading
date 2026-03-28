@@ -4,8 +4,10 @@ import {
   EMPTY_CHART_DRAWINGS,
   type ChartDrawings,
   type DrawingsState,
+  type Point,
   type Rectangle,
   type Trendline,
+  createDrawingId,
 } from "../types/drawings";
 
 type Timeframe = "15s" | "1m" | "3m";
@@ -27,6 +29,66 @@ const DEFAULT_PANELS: Panel[] = [
 
 const DRAWINGS_STORAGE_KEY = "layout-manager-drawings-v1";
 
+function normalizePoint(value: unknown): Point | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const maybePoint = value as { time?: unknown; price?: unknown };
+  if (typeof maybePoint.time !== "number" || typeof maybePoint.price !== "number") {
+    return null;
+  }
+
+  return {
+    time: maybePoint.time as Point["time"],
+    price: maybePoint.price,
+  };
+}
+
+function normalizeTrendline(value: unknown): Trendline | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const maybeLine = value as { id?: unknown; start?: unknown; end?: unknown };
+  const start = normalizePoint(maybeLine.start);
+  const end = normalizePoint(maybeLine.end);
+  if (!start || !end) return null;
+
+  return {
+    id: typeof maybeLine.id === "string" ? maybeLine.id : createDrawingId("trendline"),
+    start,
+    end,
+  };
+}
+
+function normalizeRectangle(value: unknown): Rectangle | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const maybeRect = value as { id?: unknown; start?: unknown; end?: unknown };
+  const start = normalizePoint(maybeRect.start);
+  const end = normalizePoint(maybeRect.end);
+  if (!start || !end) return null;
+
+  return {
+    id: typeof maybeRect.id === "string" ? maybeRect.id : createDrawingId("rectangle"),
+    start,
+    end,
+  };
+}
+
+function normalizeChartDrawings(value: unknown): ChartDrawings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return EMPTY_CHART_DRAWINGS;
+  }
+
+  const maybeDrawings = value as { trendlines?: unknown; rectangles?: unknown };
+  return {
+    trendlines: Array.isArray(maybeDrawings.trendlines)
+      ? maybeDrawings.trendlines.map(normalizeTrendline).filter((line): line is Trendline => line !== null)
+      : [],
+    rectangles: Array.isArray(maybeDrawings.rectangles)
+      ? maybeDrawings.rectangles.map(normalizeRectangle).filter((rect): rect is Rectangle => rect !== null)
+      : [],
+  };
+}
+
 function readStoredDrawings(): DrawingsState {
   if (typeof window === "undefined") return {};
 
@@ -39,7 +101,12 @@ function readStoredDrawings(): DrawingsState {
       return {};
     }
 
-    return parsed as DrawingsState;
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>).map(([chartId, chartDrawings]) => [
+        chartId,
+        normalizeChartDrawings(chartDrawings),
+      ])
+    );
   } catch (error) {
     console.error("[LayoutManager] Failed to read drawings:", error);
     return {};
