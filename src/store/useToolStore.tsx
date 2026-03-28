@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type ToolType = "none" | "trendline" | "rectangle";
+export type ToolType = "none" | "trendline" | "rectangle" | "text";
 
 type ToolState = {
   tool: ToolType;

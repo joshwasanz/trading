@@ -92,9 +92,6 @@ function AppInner() {
   const [data, setData] = useState(() => readStoredData());
   const dataRef = useRef(data);
 
-  const [crosshairTime, setCrosshairTime] = useState<number | null>(null);
-  const [timeRange, setTimeRange] = useState<any>(null);
-  const [rangeSource, setRangeSource] = useState<string | null>(null);
   const [activeChart, setActiveChart] = useState<string | null>(null);
   const [layoutType, setLayoutType] = useState("2");
 
@@ -188,12 +185,6 @@ function AppInner() {
             layoutType={layoutType}
             activeChart={activeChart}
             setActiveChart={setActiveChart}
-            crosshairTime={crosshairTime}
-            setCrosshairTime={setCrosshairTime}
-            timeRange={timeRange}
-            setTimeRange={setTimeRange}
-            rangeSource={rangeSource}
-            setRangeSource={setRangeSource}
             tool={tool}
             magnet={magnet}
           />

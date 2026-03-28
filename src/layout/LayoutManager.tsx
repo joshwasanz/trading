@@ -4,11 +4,13 @@ import {
   DEFAULT_TRENDLINE_EXTENSION,
   EMPTY_CHART_DRAWINGS,
   type ChartDrawings,
+  type Drawing,
   type DrawingSelection,
   type DrawingsState,
   type LineExtension,
   type Point,
   type Rectangle,
+  type TextDrawing,
   type Trendline,
   createDrawingId,
 } from "../types/drawings";
@@ -24,10 +26,10 @@ type Panel = {
 const DEFAULT_PANELS: Panel[] = [
   { id: "A", symbol: "nq", timeframe: "15s" },
   { id: "B", symbol: "es", timeframe: "15s" },
-  { id: "C", symbol: "dxy", timeframe: "15s" },
-  { id: "D", symbol: "nq", timeframe: "1m" },
-  { id: "E", symbol: "es", timeframe: "1m" },
-  { id: "F", symbol: "dxy", timeframe: "1m" },
+  { id: "C", symbol: "nq", timeframe: "1m" },
+  { id: "D", symbol: "es", timeframe: "1m" },
+  { id: "E", symbol: "nq", timeframe: "3m" },
+  { id: "F", symbol: "es", timeframe: "3m" },
 ];
 
 const DRAWINGS_STORAGE_KEY = "layout-manager-drawings-v2";
@@ -93,18 +95,46 @@ function normalizeRectangle(value: unknown): Rectangle | null {
   };
 }
 
+function normalizeTextDrawing(value: unknown): TextDrawing | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const maybeText = value as {
+    id?: unknown;
+    time?: unknown;
+    price?: unknown;
+    text?: unknown;
+  };
+  if (typeof maybeText.time !== "number" || typeof maybeText.price !== "number") {
+    return null;
+  }
+
+  return {
+    id: typeof maybeText.id === "string" ? maybeText.id : createDrawingId("text"),
+    time: maybeText.time as Point["time"],
+    price: maybeText.price,
+    text: typeof maybeText.text === "string" ? maybeText.text : "Text",
+  };
+}
+
 function normalizeChartDrawings(value: unknown): ChartDrawings {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return EMPTY_CHART_DRAWINGS;
   }
 
-  const maybeDrawings = value as { trendlines?: unknown; rectangles?: unknown };
+  const maybeDrawings = value as {
+    trendlines?: unknown;
+    rectangles?: unknown;
+    texts?: unknown;
+  };
   return {
     trendlines: Array.isArray(maybeDrawings.trendlines)
       ? maybeDrawings.trendlines.map(normalizeTrendline).filter((line): line is Trendline => line !== null)
       : [],
     rectangles: Array.isArray(maybeDrawings.rectangles)
       ? maybeDrawings.rectangles.map(normalizeRectangle).filter((rect): rect is Rectangle => rect !== null)
+      : [],
+    texts: Array.isArray(maybeDrawings.texts)
+      ? maybeDrawings.texts.map(normalizeTextDrawing).filter((text): text is TextDrawing => text !== null)
       : [],
   };
 }
@@ -130,6 +160,7 @@ function mergeChartDrawings(current: ChartDrawings, incoming: ChartDrawings): Ch
   return {
     trendlines: mergeUniqueById([...current.trendlines, ...incoming.trendlines]),
     rectangles: mergeUniqueById([...current.rectangles, ...incoming.rectangles]),
+    texts: mergeUniqueById([...current.texts, ...incoming.texts]),
   };
 }
 
@@ -169,11 +200,6 @@ export default function LayoutManager({
   layoutType,
   activeChart,
   setActiveChart,
-  setCrosshairTime,
-  timeRange,
-  setTimeRange,
-  rangeSource,
-  setRangeSource,
   tool,
   magnet,
 }: any) {
@@ -182,6 +208,7 @@ export default function LayoutManager({
   const [panels, setPanels] = useState<Panel[]>(DEFAULT_PANELS);
   const [focused, setFocused] = useState<string | null>(null);
   const [drawingsBySymbol, setDrawingsBySymbol] = useState<DrawingsState>(() => readStoredDrawings());
+  const [hiddenSymbols, setHiddenSymbols] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     try {
@@ -194,13 +221,6 @@ export default function LayoutManager({
   const sharedProps = {
     activeChart,
     setActiveChart,
-    onCrosshairMove: (time: number) => setCrosshairTime(time),
-    onTimeRangeChange: (range: any, sourceChartId: string) => {
-      setTimeRange(range);
-      setRangeSource(sourceChartId);
-    },
-    externalRange: timeRange,
-    rangeSource,
     tool,
     magnet,
   };
@@ -234,6 +254,7 @@ export default function LayoutManager({
       updateSymbolDrawings(symbol, (current) => ({
         trendlines: [...current.trendlines, line],
         rectangles: current.rectangles,
+        texts: current.texts,
       }));
     },
     [updateSymbolDrawings]
@@ -244,6 +265,18 @@ export default function LayoutManager({
       updateSymbolDrawings(symbol, (current) => ({
         trendlines: current.trendlines,
         rectangles: [...current.rectangles, rect],
+        texts: current.texts,
+      }));
+    },
+    [updateSymbolDrawings]
+  );
+
+  const handleAddText = useCallback(
+    (symbol: string, text: TextDrawing) => {
+      updateSymbolDrawings(symbol, (current) => ({
+        trendlines: current.trendlines,
+        rectangles: current.rectangles,
+        texts: [...current.texts, text],
       }));
     },
     [updateSymbolDrawings]
@@ -254,6 +287,7 @@ export default function LayoutManager({
       updateSymbolDrawings(symbol, (current) => ({
         trendlines: current.trendlines.filter((line) => line.id !== id),
         rectangles: current.rectangles.filter((rect) => rect.id !== id),
+        texts: current.texts.filter((text) => text.id !== id),
       }));
     },
     [updateSymbolDrawings]
@@ -263,32 +297,71 @@ export default function LayoutManager({
     (
       symbol: string,
       selection: DrawingSelection,
-      points: { start: Point; end: Point }
+      nextDrawing: Drawing
     ) => {
       updateSymbolDrawings(symbol, (current) => {
         if (selection.type === "trendline") {
           return {
             trendlines: current.trendlines.map((line) =>
               line.id === selection.id
-                ? { ...line, start: points.start, end: points.end }
+                ? (nextDrawing as Trendline)
                 : line
             ),
             rectangles: current.rectangles,
+            texts: current.texts,
+          };
+        }
+
+        if (selection.type === "rectangle") {
+          return {
+            trendlines: current.trendlines,
+            rectangles: current.rectangles.map((rect) =>
+              rect.id === selection.id
+                ? (nextDrawing as Rectangle)
+                : rect
+            ),
+            texts: current.texts,
           };
         }
 
         return {
           trendlines: current.trendlines,
-          rectangles: current.rectangles.map((rect) =>
-            rect.id === selection.id
-              ? { ...rect, start: points.start, end: points.end }
-              : rect
+          rectangles: current.rectangles,
+          texts: current.texts.map((text) =>
+            text.id === selection.id
+              ? (nextDrawing as TextDrawing)
+              : text
           ),
         };
       });
     },
     [updateSymbolDrawings]
   );
+
+  const hideDrawings = useCallback((symbol: string) => {
+    setHiddenSymbols((prev) => ({
+      ...prev,
+      [symbol]: true,
+    }));
+  }, []);
+
+  const showDrawings = useCallback((symbol: string) => {
+    setHiddenSymbols((prev) => ({
+      ...prev,
+      [symbol]: false,
+    }));
+  }, []);
+
+  const clearDrawings = useCallback((symbol: string) => {
+    setDrawingsBySymbol((prev) => ({
+      ...prev,
+      [symbol]: {
+        trendlines: [],
+        rectangles: [],
+        texts: [],
+      },
+    }));
+  }, []);
 
   const renderPanel = (panel: Panel, onFocus: () => void) => (
     <ChartPanel
@@ -297,10 +370,15 @@ export default function LayoutManager({
       timeframe={panel.timeframe}
       data={data[panel.symbol]?.[panel.timeframe] || []}
       drawings={getSymbolDrawings(panel.symbol)}
+      drawingsHidden={hiddenSymbols[panel.symbol] === true}
       onAddTrendline={handleAddTrendline}
       onAddRectangle={handleAddRectangle}
+      onAddText={handleAddText}
       onDeleteDrawing={handleDeleteDrawing}
       onUpdateDrawing={handleUpdateDrawing}
+      onHideDrawings={() => hideDrawings(panel.symbol)}
+      onShowDrawings={() => showDrawings(panel.symbol)}
+      onClearDrawings={() => clearDrawings(panel.symbol)}
       onFocus={onFocus}
       onSymbolChange={(symbol) => updatePanel(panel.id, { symbol })}
       onTimeframeChange={(timeframe) => updatePanel(panel.id, { timeframe })}

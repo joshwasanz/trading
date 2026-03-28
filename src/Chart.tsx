@@ -14,10 +14,12 @@ import {
   DEFAULT_TRENDLINE_EXTENSION,
   createDrawingId,
   type ChartDrawings,
+  type Drawing,
   type DrawingSelection,
   type LineExtension,
   type Point,
   type Rectangle,
+  type TextDrawing,
   type Trendline,
 } from "./types/drawings";
 
@@ -31,21 +33,19 @@ type Candle = {
 
 type Props = {
   data: Candle[];
-  onCrosshairMove?: (time: number) => void;
-  onTimeRangeChange?: (range: any, chartId: string) => void;
-  externalRange?: any;
   activeChart?: string | null;
   setActiveChart?: (id: string) => void;
-  rangeSource?: string | null;
   chartId: string;
   seriesKey: string;
   drawings: ChartDrawings;
   onAddTrendline: (chartId: string, line: Trendline) => void;
   onAddRectangle: (chartId: string, rect: Rectangle) => void;
+  onAddText: (chartId: string, text: TextDrawing) => void;
   onDeleteDrawing?: (id: string) => void;
-  onUpdateDrawing?: (selection: DrawingSelection, points: { start: Point; end: Point }) => void;
+  onUpdateDrawing?: (selection: DrawingSelection, drawing: Drawing) => void;
   tool?: string | null;
   magnet?: boolean;
+  hidden?: boolean;
 };
 
 type ScreenPoint = {
@@ -66,6 +66,10 @@ type DragTarget = {
   selection: DrawingSelection;
   dragMode: DragMode;
 };
+
+const TEXT_FONT_SIZE = 12;
+const TEXT_PADDING_X = 4;
+const TEXT_PADDING_Y = 3;
 
 function getLineBoundaryIntersections(
   start: ScreenPoint,
@@ -247,30 +251,74 @@ function getDragModeCursor(dragMode: DragMode): string {
   return "pointer";
 }
 
+function isPointDrawing(drawing: Drawing): drawing is Trendline | Rectangle {
+  return "start" in drawing && "end" in drawing;
+}
+
+function isTextDrawing(drawing: Drawing): drawing is TextDrawing {
+  return "time" in drawing && "price" in drawing && "text" in drawing;
+}
+
+function applyTextFont(ctx: CanvasRenderingContext2D, dpr: number) {
+  ctx.font = `${TEXT_FONT_SIZE * dpr}px sans-serif`;
+  ctx.textBaseline = "middle";
+}
+
+function getTextBounds(
+  ctx: CanvasRenderingContext2D,
+  anchor: ScreenPoint,
+  text: string,
+  dpr: number
+) {
+  applyTextFont(ctx, dpr);
+
+  const width = ctx.measureText(text || "Text").width;
+  const paddingX = TEXT_PADDING_X * dpr;
+  const paddingY = TEXT_PADDING_Y * dpr;
+  const height = TEXT_FONT_SIZE * dpr;
+
+  return {
+    left: anchor.x - paddingX,
+    top: anchor.y - height / 2 - paddingY,
+    width: width + paddingX * 2,
+    height: height + paddingY * 2,
+  };
+}
+
+function pointHitsBounds(
+  point: ScreenPoint,
+  bounds: { left: number; top: number; width: number; height: number },
+  padding: number
+): boolean {
+  return (
+    point.x >= bounds.left - padding &&
+    point.x <= bounds.left + bounds.width + padding &&
+    point.y >= bounds.top - padding &&
+    point.y <= bounds.top + bounds.height + padding
+  );
+}
+
 export default function Chart({
   data,
-  onCrosshairMove,
-  onTimeRangeChange,
-  externalRange,
   activeChart,
   setActiveChart,
-  rangeSource,
   chartId,
   seriesKey,
   drawings,
   onAddTrendline,
   onAddRectangle,
+  onAddText,
   onDeleteDrawing,
   onUpdateDrawing,
   tool,
   magnet = false,
+  hidden = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick", Time> | null>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
 
-  const rangeTimeoutRef = useRef<number | null>(null);
   const overlayFrameRef = useRef<number | null>(null);
   const initFrameRef = useRef<number | null>(null);
   const readyFrameRef = useRef<number | null>(null);
@@ -281,13 +329,13 @@ export default function Chart({
   const activeChartRef = useRef<string | null>(null);
   const toolRef = useRef(tool);
   const magnetRef = useRef(magnet);
+  const hiddenRef = useRef(hidden);
   const dataRef = useRef(data);
   const drawingsRef = useRef(drawings);
   const selectedDrawingRef = useRef<DrawingSelection | null>(null);
   const onAddTrendlineRef = useRef(onAddTrendline);
   const onAddRectangleRef = useRef(onAddRectangle);
-  const onCrosshairMoveRef = useRef(onCrosshairMove);
-  const onTimeRangeChangeRef = useRef(onTimeRangeChange);
+  const onAddTextRef = useRef(onAddText);
   const onDeleteDrawingRef = useRef(onDeleteDrawing);
   const onUpdateDrawingRef = useRef(onUpdateDrawing);
 
@@ -296,7 +344,7 @@ export default function Chart({
   const isDraggingRef = useRef(false);
   const dragStartPointRef = useRef<Point | null>(null);
   const dragStartScreenRef = useRef<ScreenPoint | null>(null);
-  const dragInitialRef = useRef<{ start: Point; end: Point } | null>(null);
+  const dragInitialRef = useRef<Drawing | null>(null);
   const dragModeRef = useRef<DragMode>("move");
   const dragMovedRef = useRef(false);
   const suppressClickRef = useRef(false);
@@ -313,6 +361,10 @@ export default function Chart({
   useEffect(() => {
     magnetRef.current = magnet;
   }, [magnet]);
+
+  useEffect(() => {
+    hiddenRef.current = hidden;
+  }, [hidden]);
 
   useEffect(() => {
     dataRef.current = data;
@@ -339,12 +391,8 @@ export default function Chart({
   }, [onAddRectangle]);
 
   useEffect(() => {
-    onCrosshairMoveRef.current = onCrosshairMove;
-  }, [onCrosshairMove]);
-
-  useEffect(() => {
-    onTimeRangeChangeRef.current = onTimeRangeChange;
-  }, [onTimeRangeChange]);
+    onAddTextRef.current = onAddText;
+  }, [onAddText]);
 
   useEffect(() => {
     onDeleteDrawingRef.current = onDeleteDrawing;
@@ -379,10 +427,26 @@ export default function Chart({
 
   const hitTestDrawings = useCallback(
     (screenPoint: ScreenPoint): DrawingSelection | null => {
+      if (hiddenRef.current) return null;
+
       const canvas = overlayRef.current;
       if (!canvas) return null;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
 
-      const threshold = 6 * (window.devicePixelRatio || 1);
+      const dpr = window.devicePixelRatio || 1;
+      const threshold = 6 * dpr;
+
+      for (let index = drawingsRef.current.texts.length - 1; index >= 0; index -= 1) {
+        const text = drawingsRef.current.texts[index];
+        const anchor = pointToScreen({ time: text.time, price: text.price });
+        if (!anchor) continue;
+
+        const bounds = getTextBounds(ctx, anchor, text.text, dpr);
+        if (pointHitsBounds(screenPoint, bounds, 2 * dpr)) {
+          return { type: "text", id: text.id };
+        }
+      }
 
       for (let index = drawingsRef.current.trendlines.length - 1; index >= 0; index -= 1) {
         const line = drawingsRef.current.trendlines[index];
@@ -424,9 +488,15 @@ export default function Chart({
   const getDrawingBySelection = useCallback((selection: DrawingSelection | null) => {
     if (!selection) return null;
 
-    return selection.type === "trendline"
-      ? drawingsRef.current.trendlines.find((line) => line.id === selection.id) ?? null
-      : drawingsRef.current.rectangles.find((rect) => rect.id === selection.id) ?? null;
+    if (selection.type === "trendline") {
+      return drawingsRef.current.trendlines.find((line) => line.id === selection.id) ?? null;
+    }
+
+    if (selection.type === "rectangle") {
+      return drawingsRef.current.rectangles.find((rect) => rect.id === selection.id) ?? null;
+    }
+
+    return drawingsRef.current.texts.find((text) => text.id === selection.id) ?? null;
   }, []);
 
   const hitTestSelectedHandles = useCallback(
@@ -434,6 +504,7 @@ export default function Chart({
       const selection = selectedDrawingRef.current;
       const drawing = getDrawingBySelection(selection);
       if (!selection || !drawing) return null;
+      if (selection.type === "text" || !isPointDrawing(drawing)) return null;
 
       const threshold = 6 * (window.devicePixelRatio || 1);
       const start = pointToScreen(drawing.start);
@@ -492,7 +563,7 @@ export default function Chart({
   );
 
   const getRectangleEdgeResizePoints = useCallback(
-    (initial: { start: Point; end: Point }, dragMode: DragMode, point: Point) => {
+    (initial: Trendline | Rectangle, dragMode: DragMode, point: Point) => {
       const nextStart = { ...initial.start };
       const nextEnd = { ...initial.end };
 
@@ -638,7 +709,11 @@ export default function Chart({
   }, []);
 
   const getDefaultCursor = useCallback(() => {
-    return toolRef.current === "trendline" || toolRef.current === "rectangle"
+    if (hiddenRef.current) return "";
+
+    return toolRef.current === "trendline" ||
+      toolRef.current === "rectangle" ||
+      toolRef.current === "text"
       ? "crosshair"
       : "";
   }, []);
@@ -682,6 +757,10 @@ export default function Chart({
 
     const dpr = window.devicePixelRatio || 1;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (hiddenRef.current) {
+      return;
+    }
 
     ctx.save();
     ctx.lineCap = "round";
@@ -776,6 +855,27 @@ export default function Chart({
       }
     }
 
+    applyTextFont(ctx, dpr);
+
+    for (const text of drawingsRef.current.texts) {
+      const anchor = pointToScreen({ time: text.time, price: text.price });
+      if (!anchor) continue;
+
+      const isSelected =
+        selectedDrawingRef.current?.type === "text" &&
+        selectedDrawingRef.current.id === text.id;
+      const bounds = getTextBounds(ctx, anchor, text.text, dpr);
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(text.text || "Text", anchor.x, anchor.y);
+
+      if (isSelected) {
+        ctx.strokeStyle = "#4da3ff";
+        ctx.lineWidth = 1.5 * dpr;
+        ctx.strokeRect(bounds.left, bounds.top, bounds.width, bounds.height);
+      }
+    }
+
     if (toolRef.current === "rectangle" && drawStartRef.current && drawPreviewRef.current) {
       const start = pointToScreen(drawStartRef.current);
       const end = pointToScreen(drawPreviewRef.current);
@@ -845,6 +945,22 @@ export default function Chart({
   }, [tool, clearDrawing]);
 
   useEffect(() => {
+    if (!hidden) {
+      setContainerCursor(getDefaultCursor());
+      scheduleOverlayDraw();
+      return;
+    }
+
+    resetDragState();
+    drawStartRef.current = null;
+    drawPreviewRef.current = null;
+    selectedDrawingRef.current = null;
+    setDrawingStep("none");
+    setSelectedDrawing(null);
+    scheduleOverlayDraw();
+  }, [getDefaultCursor, hidden, resetDragState, scheduleOverlayDraw, setContainerCursor]);
+
+  useEffect(() => {
     hasInitialData.current = false;
     resetDragState();
     drawStartRef.current = null;
@@ -873,7 +989,9 @@ export default function Chart({
     const exists =
       selectedDrawing.type === "trendline"
         ? drawings.trendlines.some((line) => line.id === selectedDrawing.id)
-        : drawings.rectangles.some((rect) => rect.id === selectedDrawing.id);
+        : selectedDrawing.type === "rectangle"
+          ? drawings.rectangles.some((rect) => rect.id === selectedDrawing.id)
+          : drawings.texts.some((text) => text.id === selectedDrawing.id);
 
     if (!exists) {
       setSelectedDrawing(null);
@@ -1024,6 +1142,10 @@ export default function Chart({
       setActiveChart?.(chartId);
       activeChartRef.current = chartId;
 
+      if (hiddenRef.current) {
+        return;
+      }
+
       const bounds = container.getBoundingClientRect();
       const localX = event.clientX - bounds.left;
       const localY = event.clientY - bounds.top;
@@ -1044,10 +1166,13 @@ export default function Chart({
       isDraggingRef.current = true;
       dragStartPointRef.current = point;
       dragStartScreenRef.current = { x: localX * dpr, y: localY * dpr };
-      dragInitialRef.current = {
-        start: { ...drawing.start },
-        end: { ...drawing.end },
-      };
+      dragInitialRef.current = isPointDrawing(drawing)
+        ? {
+            ...drawing,
+            start: { ...drawing.start },
+            end: { ...drawing.end },
+          }
+        : { ...drawing };
       dragModeRef.current = dragTarget.dragMode;
       dragMovedRef.current = false;
       setPressedNavigationEnabled(false);
@@ -1057,6 +1182,42 @@ export default function Chart({
       event.preventDefault();
     };
     container.addEventListener("mousedown", handleMouseDown);
+
+    const handleDoubleClick = (event: MouseEvent) => {
+      setActiveChart?.(chartId);
+      activeChartRef.current = chartId;
+
+      if (hiddenRef.current) {
+        return;
+      }
+
+      const bounds = container.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const screenPoint = {
+        x: (event.clientX - bounds.left) * dpr,
+        y: (event.clientY - bounds.top) * dpr,
+      };
+      const hit = hitTestDrawings(screenPoint);
+      if (!hit || hit.type !== "text") return;
+
+      const drawing = getDrawingBySelection(hit);
+      if (!drawing || !isTextDrawing(drawing)) return;
+
+      setSelectedDrawing(hit);
+      const nextText = window.prompt("Edit text:", drawing.text);
+      if (nextText === null) {
+        scheduleOverlayDraw();
+        return;
+      }
+
+      onUpdateDrawingRef.current?.(hit, {
+        ...drawing,
+        text: nextText.trim() || "Text",
+      });
+      scheduleOverlayDraw();
+      event.preventDefault();
+    };
+    container.addEventListener("dblclick", handleDoubleClick);
 
     chart.resize(Math.max(container.clientWidth, 1), Math.max(container.clientHeight, 1));
     syncOverlaySize();
@@ -1076,19 +1237,8 @@ export default function Chart({
     });
     resizeObserver.observe(container);
 
-    const handleVisibleRangeChange = (range: any) => {
+    const handleVisibleRangeChange = () => {
       scheduleOverlayDraw();
-      if (!range || activeChartRef.current !== chartId) {
-        return;
-      }
-
-      if (rangeTimeoutRef.current !== null) {
-        window.clearTimeout(rangeTimeoutRef.current);
-      }
-
-      rangeTimeoutRef.current = window.setTimeout(() => {
-        onTimeRangeChangeRef.current?.(range, chartId);
-      }, 60);
     };
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
 
@@ -1096,8 +1246,12 @@ export default function Chart({
       try {
         const rawPoint = getRawPointFromParam(param);
         const snappedPoint = getSnappedPointFromParam(param);
-        if (rawPoint) {
-          onCrosshairMoveRef.current?.(rawPoint.time as number);
+
+        if (hiddenRef.current) {
+          if (!isDraggingRef.current) {
+            setContainerCursor(getDefaultCursor());
+          }
+          return;
         }
 
         if (
@@ -1128,22 +1282,33 @@ export default function Chart({
 
           const initial = dragInitialRef.current;
           const selection = selectedDrawingRef.current;
+          if (!initial) return;
 
           if (dragModeRef.current === "move") {
             const dx = rawPoint.time - dragStartPointRef.current.time;
             const dy = rawPoint.price - dragStartPointRef.current.price;
+            if (selection.type === "text" && isTextDrawing(initial)) {
+              onUpdateDrawingRef.current?.(selection, {
+                ...initial,
+                time: (initial.time + dx) as UTCTimestamp,
+                price: initial.price + dy,
+              });
+            } else if (isPointDrawing(initial)) {
+              onUpdateDrawingRef.current?.(selection, {
+                ...initial,
+                start: {
+                  time: (initial.start.time + dx) as UTCTimestamp,
+                  price: initial.start.price + dy,
+                },
+                end: {
+                  time: (initial.end.time + dx) as UTCTimestamp,
+                  price: initial.end.price + dy,
+                },
+              });
+            }
+          } else if (dragModeRef.current === "resize-start" && snappedPoint && isPointDrawing(initial)) {
             onUpdateDrawingRef.current?.(selection, {
-              start: {
-                time: (initial.start.time + dx) as UTCTimestamp,
-                price: initial.start.price + dy,
-              },
-              end: {
-                time: (initial.end.time + dx) as UTCTimestamp,
-                price: initial.end.price + dy,
-              },
-            });
-          } else if (dragModeRef.current === "resize-start" && snappedPoint) {
-            onUpdateDrawingRef.current?.(selection, {
+              ...initial,
               start: snappedPoint,
               end: initial.end,
             });
@@ -1153,14 +1318,19 @@ export default function Chart({
               dragModeRef.current === "resize-right" ||
               dragModeRef.current === "resize-top" ||
               dragModeRef.current === "resize-bottom") &&
-            snappedPoint
+            snappedPoint &&
+            isPointDrawing(initial)
           ) {
             onUpdateDrawingRef.current?.(
               selection,
-              getRectangleEdgeResizePoints(initial, dragModeRef.current, snappedPoint)
+              {
+                ...initial,
+                ...getRectangleEdgeResizePoints(initial, dragModeRef.current, snappedPoint),
+              }
             );
-          } else if (snappedPoint) {
+          } else if (snappedPoint && isPointDrawing(initial)) {
             onUpdateDrawingRef.current?.(selection, {
+              ...initial,
               start: initial.start,
               end: snappedPoint,
             });
@@ -1190,11 +1360,7 @@ export default function Chart({
           }
         }
 
-        if (
-          (toolRef.current === "trendline" || toolRef.current === "rectangle") &&
-          drawStartRef.current &&
-          snappedPoint
-        ) {
+        if ((toolRef.current === "trendline" || toolRef.current === "rectangle") && drawStartRef.current && snappedPoint) {
           drawPreviewRef.current = snappedPoint;
           scheduleOverlayDraw();
         }
@@ -1208,6 +1374,11 @@ export default function Chart({
       try {
         if (suppressClickRef.current) {
           suppressClickRef.current = false;
+          return;
+        }
+
+        if (hiddenRef.current) {
+          scheduleOverlayDraw();
           return;
         }
 
@@ -1234,6 +1405,29 @@ export default function Chart({
         }
 
         const currentTool = toolRef.current;
+        if (currentTool === "text") {
+          const point = getSnappedPointFromParam(param);
+          if (!point) return;
+
+          const enteredText = window.prompt("Text:", "Text");
+          if (enteredText === null) {
+            scheduleOverlayDraw();
+            return;
+          }
+
+          const text: TextDrawing = {
+            id: createDrawingId("text"),
+            time: point.time,
+            price: point.price,
+            text: enteredText.trim() || "Text",
+          };
+          onAddTextRef.current(chartId, text);
+          setSelectedDrawing({ type: "text", id: text.id });
+          scheduleOverlayDraw();
+          setTool("none");
+          return;
+        }
+
         if (currentTool !== "trendline" && currentTool !== "rectangle") {
           scheduleOverlayDraw();
           return;
@@ -1290,13 +1484,10 @@ export default function Chart({
 
     return () => {
       container.removeEventListener("mousedown", handleMouseDown);
+      container.removeEventListener("dblclick", handleDoubleClick);
       chart.unsubscribeClick(handleClick);
       chart.unsubscribeCrosshairMove(handleCrosshairMove);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
-
-      if (rangeTimeoutRef.current !== null) {
-        window.clearTimeout(rangeTimeoutRef.current);
-      }
 
       if (overlayFrameRef.current !== null) {
         window.cancelAnimationFrame(overlayFrameRef.current);
@@ -1382,16 +1573,6 @@ export default function Chart({
   }, [data, scheduleOverlayDraw]);
 
   useEffect(() => {
-    if (!chartRef.current || !externalRange || rangeSource === chartId) return;
-
-    try {
-      chartRef.current.timeScale().setVisibleLogicalRange(externalRange);
-    } catch (error) {
-      console.error("[Chart] setVisibleLogicalRange error:", error);
-    }
-  }, [externalRange, rangeSource, chartId]);
-
-  useEffect(() => {
     scheduleOverlayDraw();
   }, [drawings, scheduleOverlayDraw]);
 
@@ -1410,7 +1591,27 @@ export default function Chart({
         }}
       />
 
-      {(tool === "trendline" || tool === "rectangle") && (
+      {hidden && (
+        <div
+          style={{
+            position: "absolute",
+            top: "8px",
+            left: "8px",
+            padding: "4px 12px",
+            background: "rgba(32, 34, 40, 0.8)",
+            color: "#d4d7de",
+            fontSize: "11px",
+            borderRadius: "3px",
+            fontWeight: "500",
+            zIndex: 10,
+            pointerEvents: "none",
+          }}
+        >
+          Drawings hidden for this symbol
+        </div>
+      )}
+
+      {!hidden && (tool === "trendline" || tool === "rectangle") && (
         <div
           style={{
             position: "absolute",
@@ -1435,6 +1636,26 @@ export default function Chart({
         >
           {drawingStep === "none" && (tool === "rectangle" ? "Click to draw rectangle" : "Click to draw trendline")}
           {drawingStep === "started" && (tool === "rectangle" ? "Click opposite corner to finish" : "Click another point to finish")}
+        </div>
+      )}
+
+      {!hidden && tool === "text" && (
+        <div
+          style={{
+            position: "absolute",
+            top: "8px",
+            left: "8px",
+            padding: "4px 12px",
+            background: "rgba(125, 139, 160, 0.35)",
+            color: "#fff",
+            fontSize: "11px",
+            borderRadius: "3px",
+            fontWeight: "500",
+            zIndex: 10,
+            pointerEvents: "none",
+          }}
+        >
+          Click to place text
         </div>
       )}
     </div>

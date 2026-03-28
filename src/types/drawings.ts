@@ -5,7 +5,7 @@ export type Point = {
   price: number;
 };
 
-export type DrawingType = "trendline" | "rectangle";
+export type DrawingType = "trendline" | "rectangle" | "text";
 export type LineExtension = "none" | "right" | "both";
 
 export type Trendline = {
@@ -21,6 +21,15 @@ export type Rectangle = {
   end: Point;
 };
 
+export type TextDrawing = {
+  id: string;
+  time: UTCTimestamp;
+  price: number;
+  text: string;
+};
+
+export type Drawing = Trendline | Rectangle | TextDrawing;
+
 export type DrawingSelection = {
   id: string;
   type: DrawingType;
@@ -29,6 +38,7 @@ export type DrawingSelection = {
 export type ChartDrawings = {
   trendlines: Trendline[];
   rectangles: Rectangle[];
+  texts: TextDrawing[];
 };
 
 export type DrawingsState = Record<string, ChartDrawings>;
@@ -36,6 +46,7 @@ export type DrawingsState = Record<string, ChartDrawings>;
 export const EMPTY_CHART_DRAWINGS: ChartDrawings = {
   trendlines: [],
   rectangles: [],
+  texts: [],
 };
 
 export const DEFAULT_TRENDLINE_EXTENSION: LineExtension = "right";

@@ -13,6 +13,7 @@ export default function Sidebar() {
   const toolNames: Record<ToolType, string> = {
     trendline: "Trendline",
     rectangle: "Rectangle",
+    text: "Text",
     none: "Pointer",
   };
 
@@ -95,6 +96,7 @@ export default function Sidebar() {
     >
       <Button value="trendline" label="/" />
       <Button value="rectangle" label="[]" />
+      <Button value="text" label="T" />
       <Button value="none" label="X" />
 
       <div style={{ position: "relative" }}>
