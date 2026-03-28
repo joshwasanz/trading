@@ -53,7 +53,14 @@ type ScreenPoint = {
   y: number;
 };
 
-type DragMode = "move" | "resize-start" | "resize-end";
+type DragMode =
+  | "move"
+  | "resize-start"
+  | "resize-end"
+  | "resize-left"
+  | "resize-right"
+  | "resize-top"
+  | "resize-bottom";
 
 type DragTarget = {
   selection: DrawingSelection;
@@ -188,6 +195,24 @@ function pointHitsRectangle(
   return point.x >= left && point.x <= right && point.y >= top && point.y <= bottom;
 }
 
+function getRectangleBounds(start: ScreenPoint, end: ScreenPoint) {
+  const left = Math.min(start.x, end.x);
+  const right = Math.max(start.x, end.x);
+  const top = Math.min(start.y, end.y);
+  const bottom = Math.max(start.y, end.y);
+
+  return {
+    left,
+    right,
+    top,
+    bottom,
+    topLeft: { x: left, y: top },
+    topRight: { x: right, y: top },
+    bottomLeft: { x: left, y: bottom },
+    bottomRight: { x: right, y: bottom },
+  };
+}
+
 function drawSelectionHandle(
   ctx: CanvasRenderingContext2D,
   point: ScreenPoint,
@@ -204,6 +229,22 @@ function isNearPoint(
   threshold: number
 ): boolean {
   return Math.hypot(point.x - target.x, point.y - target.y) <= threshold;
+}
+
+function getDragModeCursor(dragMode: DragMode): string {
+  if (dragMode === "resize-left" || dragMode === "resize-right") {
+    return "ew-resize";
+  }
+
+  if (dragMode === "resize-top" || dragMode === "resize-bottom") {
+    return "ns-resize";
+  }
+
+  if (dragMode === "move") {
+    return "grab";
+  }
+
+  return "pointer";
 }
 
 export default function Chart({
@@ -376,6 +417,44 @@ export default function Chart({
       const end = pointToScreen(drawing.end);
       if (!start || !end) return null;
 
+      if (selection.type === "rectangle") {
+        if (isNearPoint(screenPoint, start, threshold)) {
+          return { selection, dragMode: "resize-start" };
+        }
+
+        if (isNearPoint(screenPoint, end, threshold)) {
+          return { selection, dragMode: "resize-end" };
+        }
+
+        const bounds = getRectangleBounds(start, end);
+
+        if (
+          distancePointToSegment(screenPoint, bounds.topLeft, bounds.bottomLeft) <= threshold
+        ) {
+          return { selection, dragMode: "resize-left" };
+        }
+
+        if (
+          distancePointToSegment(screenPoint, bounds.topRight, bounds.bottomRight) <= threshold
+        ) {
+          return { selection, dragMode: "resize-right" };
+        }
+
+        if (
+          distancePointToSegment(screenPoint, bounds.topLeft, bounds.topRight) <= threshold
+        ) {
+          return { selection, dragMode: "resize-top" };
+        }
+
+        if (
+          distancePointToSegment(screenPoint, bounds.bottomLeft, bounds.bottomRight) <= threshold
+        ) {
+          return { selection, dragMode: "resize-bottom" };
+        }
+
+        return null;
+      }
+
       if (isNearPoint(screenPoint, start, threshold)) {
         return { selection, dragMode: "resize-start" };
       }
@@ -387,6 +466,45 @@ export default function Chart({
       return null;
     },
     [getDrawingBySelection, pointToScreen]
+  );
+
+  const getRectangleEdgeResizePoints = useCallback(
+    (initial: { start: Point; end: Point }, dragMode: DragMode, point: Point) => {
+      const nextStart = { ...initial.start };
+      const nextEnd = { ...initial.end };
+
+      if (dragMode === "resize-left") {
+        if (initial.start.time <= initial.end.time) {
+          nextStart.time = point.time;
+        } else {
+          nextEnd.time = point.time;
+        }
+      } else if (dragMode === "resize-right") {
+        if (initial.start.time >= initial.end.time) {
+          nextStart.time = point.time;
+        } else {
+          nextEnd.time = point.time;
+        }
+      } else if (dragMode === "resize-top") {
+        if (initial.start.price >= initial.end.price) {
+          nextStart.price = point.price;
+        } else {
+          nextEnd.price = point.price;
+        }
+      } else if (dragMode === "resize-bottom") {
+        if (initial.start.price <= initial.end.price) {
+          nextStart.price = point.price;
+        } else {
+          nextEnd.price = point.price;
+        }
+      }
+
+      return {
+        start: nextStart,
+        end: nextEnd,
+      };
+    },
+    []
   );
 
   const hitTestDragTarget = useCallback(
@@ -869,7 +987,7 @@ export default function Chart({
       dragMovedRef.current = false;
       setPressedNavigationEnabled(false);
       setContainerCursor(
-        dragTarget.dragMode === "move" ? "grabbing" : "pointer"
+        dragTarget.dragMode === "move" ? "grabbing" : getDragModeCursor(dragTarget.dragMode)
       );
       event.preventDefault();
     };
@@ -957,6 +1075,18 @@ export default function Chart({
               start: snappedPoint,
               end: initial.end,
             });
+          } else if (
+            selection.type === "rectangle" &&
+            (dragModeRef.current === "resize-left" ||
+              dragModeRef.current === "resize-right" ||
+              dragModeRef.current === "resize-top" ||
+              dragModeRef.current === "resize-bottom") &&
+            snappedPoint
+          ) {
+            onUpdateDrawingRef.current?.(
+              selection,
+              getRectangleEdgeResizePoints(initial, dragModeRef.current, snappedPoint)
+            );
           } else if (snappedPoint) {
             onUpdateDrawingRef.current?.(selection, {
               start: initial.start,
@@ -976,8 +1106,10 @@ export default function Chart({
               y: param.point.y * dpr,
             };
 
-            if (hitTestSelectedHandles(screenPoint)) {
-              setContainerCursor("pointer");
+            const handleHit = hitTestSelectedHandles(screenPoint);
+
+            if (handleHit) {
+              setContainerCursor(getDragModeCursor(handleHit.dragMode));
             } else if (hitTestDrawings(screenPoint)) {
               setContainerCursor("grab");
             } else {
@@ -1109,6 +1241,7 @@ export default function Chart({
     chartId,
     getDefaultCursor,
     getDrawingBySelection,
+    getRectangleEdgeResizePoints,
     getRawPointFromParam,
     getSnappedPointFromParam,
     hitTestDragTarget,
