@@ -10,6 +10,8 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 import { useToolStore } from "./store/useToolStore";
+import { useThemeStore } from "./store/useThemeStore";
+import DrawingStylePanel from "./components/DrawingStylePanel";
 import {
   DEFAULT_TRENDLINE_EXTENSION,
   createDrawingId,
@@ -350,6 +352,7 @@ export default function Chart({
   const suppressClickRef = useRef(false);
 
   const setTool = useToolStore((state) => state.setTool);
+  const { theme } = useThemeStore();
   const [drawingStep, setDrawingStep] = useState<"none" | "started">("none");
   const [selectedDrawing, setSelectedDrawing] = useState<DrawingSelection | null>(null);
   const [chartReady, setChartReady] = useState(false);
@@ -783,12 +786,18 @@ export default function Chart({
         selectedDrawingRef.current?.type === "trendline" &&
         selectedDrawingRef.current.id === line.id;
 
-      ctx.strokeStyle = isSelected ? "#ffffff" : "#4da3ff";
-      ctx.lineWidth = (isSelected ? 3 : 2) * dpr;
+      const color = line.color || theme.accent;
+      const width = line.width || 2;
+      const opacity = line.opacity ?? 1;
+
+      ctx.globalAlpha = opacity;
+      ctx.strokeStyle = isSelected ? "#ffffff" : color;
+      ctx.lineWidth = (isSelected ? 3 : width) * dpr;
       ctx.beginPath();
       ctx.moveTo(extended.start.x, extended.start.y);
       ctx.lineTo(extended.end.x, extended.end.y);
       ctx.stroke();
+      ctx.globalAlpha = 1;
 
       if (isSelected) {
         ctx.fillStyle = "#ffffff";
@@ -809,7 +818,10 @@ export default function Chart({
           canvas.height
         );
         if (extended) {
-          ctx.strokeStyle = "#4da3ff";
+          const accentColor = getComputedStyle(document.documentElement)
+            .getPropertyValue("--panel-accent")
+            .trim();
+          ctx.strokeStyle = accentColor;
           ctx.lineWidth = 2 * dpr;
           ctx.setLineDash([6 * dpr, 4 * dpr]);
           ctx.globalAlpha = 0.8;
@@ -837,14 +849,19 @@ export default function Chart({
         selectedDrawingRef.current.id === rect.id;
       const x = Math.min(start.x, end.x);
       const y = Math.min(start.y, end.y);
-      const width = Math.abs(end.x - start.x);
-      const height = Math.abs(end.y - start.y);
+      const rectWidth = Math.abs(end.x - start.x);
+      const rectHeight = Math.abs(end.y - start.y);
 
-      ctx.strokeStyle = isSelected ? "#ffffff" : "#f5a623";
+      const color = rect.color || "#f5a623";
+      const rwidth = rect.width || 2;
+      const opacity = rect.opacity ?? 1;
+
+      ctx.globalAlpha = opacity;
+      ctx.strokeStyle = isSelected ? "#ffffff" : color;
       ctx.fillStyle = isSelected ? "rgba(255, 255, 255, 0.12)" : "rgba(245, 166, 35, 0.15)";
-      ctx.lineWidth = (isSelected ? 3 : 2) * dpr;
+      ctx.lineWidth = (isSelected ? 3 : rwidth) * dpr;
       ctx.beginPath();
-      ctx.rect(x, y, width, height);
+      ctx.rect(x, y, rectWidth, rectHeight);
       ctx.fill();
       ctx.stroke();
 
@@ -870,7 +887,10 @@ export default function Chart({
       ctx.fillText(text.text || "Text", anchor.x, anchor.y);
 
       if (isSelected) {
-        ctx.strokeStyle = "#4da3ff";
+        const accentColor = getComputedStyle(document.documentElement)
+          .getPropertyValue("--panel-accent")
+          .trim();
+        ctx.strokeStyle = accentColor;
         ctx.lineWidth = 1.5 * dpr;
         ctx.strokeRect(bounds.left, bounds.top, bounds.width, bounds.height);
       }
@@ -1009,6 +1029,34 @@ export default function Chart({
   }, [getDefaultCursor, setContainerCursor, tool]);
 
   useEffect(() => {
+    if (!chartRef.current) return;
+
+    chartRef.current.applyOptions({
+      layout: {
+        background: { color: theme.background },
+        textColor: theme.text,
+      },
+      grid: {
+        vertLines: { color: theme.grid },
+        horzLines: { color: theme.grid },
+      },
+    });
+
+    if (seriesRef.current) {
+      seriesRef.current.applyOptions({
+        upColor: theme.candleUp,
+        downColor: theme.candleDown,
+        borderUpColor: theme.candleUp,
+        borderDownColor: theme.candleDown,
+        wickUpColor: theme.wickUp,
+        wickDownColor: theme.wickDown,
+      });
+    }
+
+    scheduleOverlayDraw();
+  }, [theme, scheduleOverlayDraw]);
+
+  useEffect(() => {
     if (readyFrameRef.current !== null) {
       window.cancelAnimationFrame(readyFrameRef.current);
       readyFrameRef.current = null;
@@ -1120,19 +1168,23 @@ export default function Chart({
         axisPressedMouseMove: { time: true, price: true },
       },
       layout: {
-        background: { color: "#0e0e11" },
-        textColor: "#c9ced6",
+        background: { color: theme.background },
+        textColor: theme.text,
       },
       grid: {
-        vertLines: { color: "#1c1f26" },
-        horzLines: { color: "#1c1f26" },
+        vertLines: { color: theme.grid },
+        horzLines: { color: theme.grid },
       },
       crosshair: { mode: CrosshairMode.Normal },
     });
 
     const series = chart.addCandlestickSeries({
-      upColor: "#26a69a",
-      downColor: "#ef5350",
+      upColor: theme.candleUp,
+      downColor: theme.candleDown,
+      borderUpColor: theme.candleUp,
+      borderDownColor: theme.candleDown,
+      wickUpColor: theme.wickUp,
+      wickDownColor: theme.wickDown,
     });
 
     chartRef.current = chart;
@@ -1420,6 +1472,9 @@ export default function Chart({
             time: point.time,
             price: point.price,
             text: enteredText.trim() || "Text",
+            color: theme.accent,
+            width: 1,
+            opacity: 1,
           };
           onAddTextRef.current(chartId, text);
           setSelectedDrawing({ type: "text", id: text.id });
@@ -1454,6 +1509,9 @@ export default function Chart({
             start,
             end: point,
             extend: DEFAULT_TRENDLINE_EXTENSION,
+            color: theme.accent,
+            width: 2,
+            opacity: 1,
           };
           onAddTrendlineRef.current(chartId, line);
           setSelectedDrawing({ type: "trendline", id: line.id });
@@ -1462,6 +1520,9 @@ export default function Chart({
             id: createDrawingId("rectangle"),
             start,
             end: point,
+            color: "#f5a623",
+            width: 2,
+            opacity: 1,
           };
           onAddRectangleRef.current(chartId, rect);
           setSelectedDrawing({ type: "rectangle", id: rect.id });
@@ -1622,10 +1683,10 @@ export default function Chart({
               drawingStep === "started"
                 ? tool === "rectangle"
                   ? "#f5a623"
-                  : "#4da3ff"
+                  : "var(--panel-accent)"
                 : tool === "rectangle"
                   ? "rgba(245, 166, 35, 0.3)"
-                  : "rgba(77, 163, 255, 0.3)",
+                  : "color-mix(in srgb, var(--panel-accent) 30%, transparent)",
             color: "#fff",
             fontSize: "11px",
             borderRadius: "3px",
@@ -1658,6 +1719,31 @@ export default function Chart({
           Click to place text
         </div>
       )}
+
+      {selectedDrawing &&
+        (() => {
+          let currentDrawing: Drawing | undefined;
+          if (selectedDrawing.type === "trendline") {
+            currentDrawing = drawingsRef.current.trendlines.find((line) => line.id === selectedDrawing.id);
+          } else if (selectedDrawing.type === "rectangle") {
+            currentDrawing = drawingsRef.current.rectangles.find((rect) => rect.id === selectedDrawing.id);
+          } else if (selectedDrawing.type === "text") {
+            currentDrawing = drawingsRef.current.texts.find((text) => text.id === selectedDrawing.id);
+          }
+          return currentDrawing ? (
+            <DrawingStylePanel
+              drawing={currentDrawing}
+              onUpdate={(patch) => {
+                if (onUpdateDrawingRef.current) {
+                  onUpdateDrawingRef.current(selectedDrawing, {
+                    ...currentDrawing,
+                    ...patch,
+                  });
+                }
+              }}
+            />
+          ) : null;
+        })()}
     </div>
   );
 }

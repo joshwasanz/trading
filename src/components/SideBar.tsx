@@ -45,7 +45,7 @@ export default function Sidebar() {
         style={{
           width: "32px",
           height: "32px",
-          background: tool === value ? "#4da3ff" : "transparent",
+          background: tool === value ? "var(--panel-accent)" : "transparent",
           color: tool === value ? "#fff" : "#aaa",
           border: "1px solid #2a2d34",
           borderRadius: "4px",

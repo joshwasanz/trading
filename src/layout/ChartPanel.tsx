@@ -99,7 +99,7 @@ export default function ChartPanel({
           style={{
             marginLeft: "6px",
             fontSize: "10px",
-            color: activeChart === chartId ? "#4da3ff" : "#555",
+            color: activeChart === chartId ? "var(--panel-accent)" : "#555",
           }}
           title={activeChart === chartId ? "Active panel" : "Inactive panel"}
         >

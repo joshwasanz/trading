@@ -8,25 +8,31 @@ export type Point = {
 export type DrawingType = "trendline" | "rectangle" | "text";
 export type LineExtension = "none" | "right" | "both";
 
+export type BaseStyle = {
+  color?: string;
+  width?: number;
+  opacity?: number;
+};
+
 export type Trendline = {
   id: string;
   start: Point;
   end: Point;
   extend: LineExtension;
-};
+} & BaseStyle;
 
 export type Rectangle = {
   id: string;
   start: Point;
   end: Point;
-};
+} & BaseStyle;
 
 export type TextDrawing = {
   id: string;
   time: UTCTimestamp;
   price: number;
   text: string;
-};
+} & BaseStyle;
 
 export type Drawing = Trendline | Rectangle | TextDrawing;
 

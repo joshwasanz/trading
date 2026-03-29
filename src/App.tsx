@@ -6,6 +6,7 @@ import LayoutManager from "./layout/LayoutManager";
 import Sidebar from "./components/SideBar";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { useToolStore } from "./store/useToolStore";
+import { useThemeStore } from "./store/useThemeStore";
 
 type Candle = {
   symbol: string;
@@ -97,6 +98,7 @@ function AppInner() {
 
   const tool = useToolStore((state) => state.tool);
   const magnet = useToolStore((state) => state.magnet);
+  const { theme } = useThemeStore();
 
   useEffect(() => {
     try {
@@ -105,6 +107,18 @@ function AppInner() {
       console.error("[App] Failed to cache chart data:", error);
     }
   }, [data]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+
+    root.style.setProperty("--app-bg", theme.background);
+    root.style.setProperty("--panel-bg", theme.panel);
+    root.style.setProperty("--panel-border", theme.border);
+    root.style.setProperty("--panel-text", theme.text);
+    root.style.setProperty("--panel-muted", theme.muted);
+    root.style.setProperty("--panel-accent", theme.accent);
+    root.style.setProperty("--grid-color", theme.grid);
+  }, [theme]);
 
   useEffect(() => {
     let cancelled = false;

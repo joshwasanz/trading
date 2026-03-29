@@ -3,10 +3,9 @@
   --panel-bg: #13151a;
   --panel-border: #2a2d34;
   --panel-text: #d4d7de;
-  --panel-muted: #8b9098;
+  --panel-muted: #7f8591;
   --panel-accent: #4da3ff;
-  --toolbar-height: 42px;
-  --panel-radius: 8px;
+  --grid-color: #1c1f26;
 }
 
 * { box-sizing: border-box; }
@@ -135,6 +134,66 @@ html, body, #root {
   color: var(--panel-text);
   font-size: 14px;
   font-weight: 600;
+}
+
+/* DRAWING STYLE PANEL */
+.drawing-style-panel {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 12px;
+  z-index: 20;
+  min-width: 200px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.style-panel__title {
+  color: var(--panel-accent);
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.style-panel__group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.style-panel__group label {
+  color: var(--panel-text);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.style-panel__row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.style-panel__row input[type="color"],
+.style-panel__row input[type="range"] {
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  background: var(--panel-bg);
+  color: var(--panel-text);
+}
+
+.style-panel__row input[type="color"] {
+  cursor: pointer;
+  min-height: 32px;
+}
+
+.style-panel__row input[type="range"] {
+  padding: 4px;
+  cursor: pointer;
 }
 
 /* 🔥 DRAWING ANIMATIONS */
