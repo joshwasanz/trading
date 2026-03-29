@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import ChartPanel from "./ChartPanel";
+import { useThemeStore } from "../store/useThemeStore";
+import { useWorkspaceStore } from "../store/useWorkspaceStore";
+import { useLayoutState } from "../store/useLayoutState";
 import {
   DEFAULT_TRENDLINE_EXTENSION,
   EMPTY_CHART_DRAWINGS,
@@ -210,6 +213,10 @@ export default function LayoutManager({
   const [drawingsBySymbol, setDrawingsBySymbol] = useState<DrawingsState>(() => readStoredDrawings());
   const [hiddenSymbols, setHiddenSymbols] = useState<Record<string, boolean>>({});
 
+  const { setMode, setPreset } = useThemeStore();
+  const { workspaces, activeWorkspaceId, updateWorkspace } = useWorkspaceStore();
+  const { setPanels: setLayoutPanels, setDrawingsBySymbol: setLayoutDrawings } = useLayoutState();
+
   useEffect(() => {
     try {
       window.localStorage.setItem(DRAWINGS_STORAGE_KEY, JSON.stringify(drawingsBySymbol));
@@ -217,6 +224,45 @@ export default function LayoutManager({
       console.error("[LayoutManager] Failed to save drawings:", error);
     }
   }, [drawingsBySymbol]);
+
+  // Sync layout state to global store
+  useEffect(() => {
+    setLayoutPanels(panels);
+  }, [panels, setLayoutPanels]);
+
+  useEffect(() => {
+    setLayoutDrawings(drawingsBySymbol);
+  }, [drawingsBySymbol, setLayoutDrawings]);
+
+  // Load workspace when activeWorkspaceId changes
+  useEffect(() => {
+    if (!activeWorkspaceId) return;
+
+    const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
+    if (!workspace) return;
+
+    // Apply workspace state
+    setPanels(workspace.panels);
+    setDrawingsBySymbol(workspace.drawingsBySymbol);
+    setMode(workspace.theme.mode);
+    setPreset(workspace.theme.preset);
+    // layoutType is controlled by parent, so we don't modify it here
+  }, [activeWorkspaceId, workspaces, setMode, setPreset]);
+
+  // Auto-save workspace changes (debounced 1000ms)
+  useEffect(() => {
+    if (!activeWorkspaceId) return;
+
+    const timer = setTimeout(() => {
+      updateWorkspace(activeWorkspaceId, {
+        panels,
+        drawingsBySymbol,
+        layoutType,
+      });
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [panels, drawingsBySymbol, layoutType, activeWorkspaceId, updateWorkspace]);
 
   const sharedProps = {
     activeChart,

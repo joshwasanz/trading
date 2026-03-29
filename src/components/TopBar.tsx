@@ -1,4 +1,7 @@
 import { useThemeStore } from "../store/useThemeStore";
+import { useWorkspaceStore } from "../store/useWorkspaceStore";
+import { useLayoutState } from "../store/useLayoutState";
+import type { Workspace } from "../types/workspace";
 
 type Props = {
   layoutType: string;
@@ -10,6 +13,8 @@ export default function TopBar({
   setLayoutType,
 }: Props) {
   const { mode, setMode, preset, setPreset } = useThemeStore();
+  const { workspaces, activeWorkspaceId, setActiveWorkspace, saveWorkspace } = useWorkspaceStore();
+  const { panels, drawingsBySymbol } = useLayoutState();
 
   return (
     <div className="top-bar">
@@ -25,6 +30,71 @@ export default function TopBar({
         <option value="3">3 Charts</option>
         <option value="6">6 Charts</option>
       </select>
+
+      {/* ================= WORKSPACE ================= */}
+      <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
+        {/* Save Workspace */}
+        <button
+          className="ui-button"
+          onClick={() => {
+            const name = prompt("Workspace name:", "My Workspace");
+            if (!name) return;
+
+            const ws: Workspace = {
+              id: crypto.randomUUID(),
+              name,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              layoutType,
+              panels,
+              drawingsBySymbol,
+              theme: { mode, preset },
+            };
+
+            saveWorkspace(ws);
+            setActiveWorkspace(ws.id);
+          }}
+          title="Save current layout and drawings"
+        >
+          💾 Save
+        </button>
+
+        {/* Load Workspace */}
+        <select
+          value={activeWorkspaceId || ""}
+          onChange={(e) => {
+            if (e.target.value) {
+              setActiveWorkspace(e.target.value);
+            }
+          }}
+          className="ui-dropdown"
+          title="Load a saved workspace"
+        >
+          <option value="">Load workspace...</option>
+          {workspaces.map((ws) => (
+            <option key={ws.id} value={ws.id}>
+              {ws.name}
+            </option>
+          ))}
+        </select>
+
+        {/* Delete Workspace */}
+        {activeWorkspaceId && (
+          <button
+            className="ui-button ui-button--danger"
+            onClick={() => {
+              const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
+              if (!workspace || !window.confirm(`Delete "${workspace.name}"?`)) return;
+
+              useWorkspaceStore.getState().deleteWorkspace(activeWorkspaceId);
+              setActiveWorkspace("");
+            }}
+            title="Delete current workspace"
+          >
+            🗑 Delete
+          </button>
+        )}
+      </div>
 
       {/* ================= THEME & PRESET ================= */}
       <div style={{ marginLeft: "auto", display: "flex", gap: "4px", alignItems: "center" }}>

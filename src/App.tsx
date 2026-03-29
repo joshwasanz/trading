@@ -7,6 +7,9 @@ import Sidebar from "./components/SideBar";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { useToolStore } from "./store/useToolStore";
 import { useThemeStore } from "./store/useThemeStore";
+import { useWorkspaceStore } from "./store/useWorkspaceStore";
+import { useCandleStore } from "./store/useCandleStore";
+import { EMPTY_CHART_DRAWINGS } from "./types/drawings";
 
 type Candle = {
   symbol: string;
@@ -20,6 +23,21 @@ type Candle = {
 type Timeframe = "15s" | "1m" | "3m";
 
 const DATA_STORAGE_KEY = "chart-data-v1";
+
+type Panel = {
+  id: string;
+  symbol: string;
+  timeframe: Timeframe;
+};
+
+const DEFAULT_PANELS: Panel[] = [
+  { id: "A", symbol: "nq", timeframe: "15s" },
+  { id: "B", symbol: "es", timeframe: "15s" },
+  { id: "C", symbol: "nq", timeframe: "1m" },
+  { id: "D", symbol: "es", timeframe: "1m" },
+  { id: "E", symbol: "nq", timeframe: "3m" },
+  { id: "F", symbol: "es", timeframe: "3m" },
+];
 
 function createEmptyTimeframeData(): Record<Timeframe, Candle[]> {
   return { "15s": [], "1m": [], "3m": [] };
@@ -89,6 +107,51 @@ function upsertCandleSeries(current: Candle[], incoming: Candle): Candle[] {
   return next;
 }
 
+// ─── Historical Loader ────────────────────────────────────────────────────────
+
+async function loadHistorical(
+  symbol: string,
+  tf: Timeframe,
+  setData: React.Dispatch<React.SetStateAction<typeof initialDataState>>
+) {
+  try {
+    const candles = await invoke<Candle[]>("get_historical", {
+      symbol,
+      timeframe: tf,
+    });
+
+    if (!candles || candles.length === 0) return;
+
+    setData((prev) => {
+      const existing = prev[symbol]?.[tf] ?? [];
+
+      // Historical candles form the base — live candles sit on top
+      const merged = [...candles];
+
+      for (const live of existing) {
+        const idx = merged.findIndex((c) => c.time === live.time);
+        if (idx !== -1) {
+          merged[idx] = live; // live overwrites the same candle
+        } else if (live.time > merged[merged.length - 1].time) {
+          merged.push(live); // newer live candles append to the end
+        }
+      }
+
+      return {
+        ...prev,
+        [symbol]: {
+          ...prev[symbol],
+          [tf]: merged,
+        },
+      };
+    });
+  } catch (err) {
+    console.warn(`[historical] Failed for ${symbol}/${tf}:`, err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function AppInner() {
   const [data, setData] = useState(() => readStoredData());
   const dataRef = useRef(data);
@@ -99,7 +162,39 @@ function AppInner() {
   const tool = useToolStore((state) => state.tool);
   const magnet = useToolStore((state) => state.magnet);
   const { theme } = useThemeStore();
+  const { workspaces, setActiveWorkspace, createDefaultWorkspace } = useWorkspaceStore();
 
+  // Keep dataRef in sync with state (including historical loads)
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
+
+  // Initialize default workspace if none exist
+  useEffect(() => {
+    if (workspaces.length > 0) return;
+
+    const defaultWorkspace = {
+      id: crypto.randomUUID(),
+      name: "Default",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      layoutType: "2",
+      panels: DEFAULT_PANELS,
+      drawingsBySymbol: {
+        nq: EMPTY_CHART_DRAWINGS,
+        es: EMPTY_CHART_DRAWINGS,
+      },
+      theme: {
+        mode: "dark" as const,
+        preset: "professional" as const,
+      },
+    };
+
+    createDefaultWorkspace(defaultWorkspace);
+    setActiveWorkspace(defaultWorkspace.id);
+  }, [workspaces.length, createDefaultWorkspace, setActiveWorkspace]);
+
+  // Persist chart data to localStorage on every change
   useEffect(() => {
     try {
       window.localStorage.setItem(DATA_STORAGE_KEY, JSON.stringify(data));
@@ -108,6 +203,7 @@ function AppInner() {
     }
   }, [data]);
 
+  // Apply theme CSS variables
   useEffect(() => {
     const root = document.documentElement;
 
@@ -120,6 +216,19 @@ function AppInner() {
     root.style.setProperty("--grid-color", theme.grid);
   }, [theme]);
 
+  // Load historical data on mount for all symbol/timeframe combos
+  useEffect(() => {
+    const symbols = ["nq", "es"];
+    const timeframes: Timeframe[] = ["15s", "1m", "3m"];
+
+    for (const symbol of symbols) {
+      for (const tf of timeframes) {
+        loadHistorical(symbol, tf, setData);
+      }
+    }
+  }, []);
+
+  // Register live stream listeners
   useEffect(() => {
     let cancelled = false;
     const unlisteners: Array<() => void> = [];

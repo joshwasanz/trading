@@ -176,11 +176,58 @@ fn start_all_streams(app: tauri::AppHandle) {
     start_symbol_stream(app.clone(), "es", 5000.0);
 }
 
+#[tauri::command]
+fn get_historical(symbol: String, timeframe: String) -> Vec<Candle> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut rng = rand::thread_rng();
+    let now = current_timestamp();
+    let tf_seconds: u64 = match timeframe.as_str() {
+        "15s" => 15,
+        "1m" => 60,
+        "3m" => 180,
+        _ => 60,
+    };
+
+    // Generate 100 candles
+    let base_price = match symbol.as_str() {
+        "nq" => 18000.0,
+        "es" => 5000.0,
+        _ => 1000.0,
+    };
+
+    let mut candles: Vec<Candle> = Vec::new();
+    let mut price = base_price;
+
+    for i in 0..100 {
+        let time = now - ((100 - i) * tf_seconds);
+        let open = price;
+
+        let change1: f64 = rng.gen_range(-10.0..10.0);
+        let high = (price + change1).max(price);
+        let change2: f64 = rng.gen_range(-10.0..10.0);
+        let low = (price + change2).min(price);
+        let change3: f64 = rng.gen_range(-5.0..5.0);
+        price += change3;
+
+        candles.push(Candle {
+            symbol: symbol.clone(),
+            time,
+            open,
+            high,
+            low,
+            close: price,
+        });
+    }
+
+    candles
+}
+
 // ==================== MAIN ====================
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![start_all_streams])
+        .invoke_handler(tauri::generate_handler![start_all_streams, get_historical])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
