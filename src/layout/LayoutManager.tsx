@@ -229,8 +229,6 @@ export default function LayoutManager({
     setPanels((prev) => prev.map((panel) => (panel.id === id ? { ...panel, ...updates } : panel)));
   }, []);
 
-  const getPanel = useCallback((id: string) => panels.find((panel) => panel.id === id)!, [panels]);
-
   const getSymbolDrawings = useCallback(
     (symbol: string): ChartDrawings => drawingsBySymbol[symbol] ?? EMPTY_CHART_DRAWINGS,
     [drawingsBySymbol]
@@ -413,7 +411,12 @@ export default function LayoutManager({
   };
 
   if (focused) {
-    const panel = getPanel(focused);
+    const panel = panels.find((p) => p.id === focused);
+    if (!panel) {
+      console.warn(`[LayoutManager] Focus panel not found: ${focused}`);
+      setFocused(null);
+      return null;
+    }
     return (
       <div className="focus-mode">
         <div className="focus-mode__header">

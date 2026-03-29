@@ -49,6 +49,47 @@ html, body, #root {
   background: rgba(255,255,255,0.05);
 }
 
+/* FOCUS MODE */
+.focus-mode {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-bg);
+}
+
+.focus-mode__header {
+  flex: 0 0 40px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--panel-border);
+  background: var(--app-bg);
+}
+
+.focus-mode__header button {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--panel-text);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.18s ease;
+}
+
+.focus-mode__header button:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.focus-mode__content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .layout-panel {
   position: absolute;
   padding: 4px;
@@ -101,6 +142,31 @@ html, body, #root {
   overflow: hidden;
 }
 
+.chart-panel__focus {
+  margin-left: auto;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--panel-text);
+  height: 24px;
+  width: 32px;
+  padding: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.18s ease;
+}
+
+.chart-panel__focus:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.chart-panel__focus--active {
+  background: var(--panel-accent);
+  color: #fff;
+  border-color: transparent;
+}
+
 /* CHART CANVAS */
 .chart-canvas {
   width: 100%;
@@ -119,6 +185,7 @@ html, body, #root {
   border-bottom: 1px solid var(--panel-border);
   background: var(--app-bg);
   z-index: 100;
+  backdrop-filter: blur(12px);
 }
 
 .top-bar select {
@@ -194,6 +261,99 @@ html, body, #root {
 .style-panel__row input[type="range"] {
   padding: 4px;
   cursor: pointer;
+}
+
+/* 🎯 UNIFIED BUTTON SYSTEM (Apple-level polish) */
+.ui-button {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--panel-text);
+  font-size: 12px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  white-space: nowrap;
+}
+
+.ui-button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.ui-button:active {
+  transform: scale(0.96);
+}
+
+.ui-button--active {
+  background: var(--panel-accent);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+}
+
+.ui-button--active:hover {
+  background: var(--panel-accent);
+  opacity: 0.9;
+}
+
+.ui-button--danger {
+  color: #ef5350;
+}
+
+.ui-button--danger:hover {
+  background: rgba(239, 83, 80, 0.12);
+  border-color: rgba(239, 83, 80, 0.3);
+}
+
+/* Sidebar button overrides */
+.sidebar .ui-button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+/* 🎨 PREMIUM DROPDOWN SYSTEM */
+.ui-dropdown {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--panel-text);
+  font-size: 12px;
+  font-weight: 500;
+  outline: none;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.ui-dropdown:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.ui-dropdown:focus {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--panel-accent);
+}
+
+/* Light mode dropdown overrides */
+@media (prefers-color-scheme: light) {
+  .ui-dropdown {
+    background: rgba(0, 0, 0, 0.03);
+    border-color: rgba(0, 0, 0, 0.1);
+  }
+  
+  .ui-dropdown:hover {
+    background: rgba(0, 0, 0, 0.06);
+    border-color: rgba(0, 0, 0, 0.15);
+  }
 }
 
 /* 🔥 DRAWING ANIMATIONS */

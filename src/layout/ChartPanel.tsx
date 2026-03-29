@@ -67,60 +67,61 @@ export default function ChartPanel({
     drawings.rectangles.length > 0 ||
     drawings.texts.length > 0;
 
-  const controlButtonStyle = {
-    height: "22px",
-    padding: "0 8px",
-    border: "1px solid #2a2d34",
-    borderRadius: "4px",
-    background: "transparent",
-    color: "#b8bec8",
-    cursor: "pointer",
-    fontSize: "10px",
-  } as const;
-
   return (
     <div className="chart-panel">
       <div className="chart-panel__drag-handle">
-        <select value={symbol} onChange={(e) => onSymbolChange?.(e.target.value)}>
-          <option value="nq">NQ</option>
-          <option value="es">ES</option>
-        </select>
+        {/* Symbol Selector */}
+        <div style={{ display: "flex", gap: "2px" }}>
+          {["nq", "es"].map((sym) => (
+            <button
+              key={sym}
+              onClick={() => onSymbolChange?.(sym)}
+              className={`ui-button ${symbol === sym ? "ui-button--active" : ""}`}
+              style={{ height: "24px", padding: "0 8px", fontSize: "11px" }}
+            >
+              {sym.toUpperCase()}
+            </button>
+          ))}
+        </div>
 
-        <select
-          value={timeframe}
-          onChange={(e) => onTimeframeChange?.(e.target.value as Timeframe)}
-        >
-          <option value="15s">15s</option>
-          <option value="1m">1m</option>
-          <option value="3m">3m</option>
-        </select>
+        {/* Timeframe Selector */}
+        <div style={{ display: "flex", gap: "2px", marginLeft: "8px" }}>
+          {["15s", "1m", "3m"].map((tf) => (
+            <button
+              key={tf}
+              onClick={() => onTimeframeChange?.(tf as Timeframe)}
+              className={`ui-button ${timeframe === tf ? "ui-button--active" : ""}`}
+              style={{ height: "24px", padding: "0 6px", fontSize: "11px" }}
+            >
+              {tf}
+            </button>
+          ))}
+        </div>
 
         <div
           style={{
             marginLeft: "6px",
             fontSize: "10px",
-            color: activeChart === chartId ? "var(--panel-accent)" : "#555",
+            color: activeChart === chartId ? "var(--panel-accent)" : "var(--panel-muted)",
           }}
           title={activeChart === chartId ? "Active panel" : "Inactive panel"}
         >
           o
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: "6px", marginLeft: "8px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "4px", marginLeft: "8px" }}>
           <button
             type="button"
             onClick={drawingsHidden ? onShowDrawings : onHideDrawings}
-            style={{
-              ...controlButtonStyle,
-              color: drawingsHidden ? "#f5a623" : "#b8bec8",
-            }}
+            className="ui-button"
+            style={{ height: "24px", padding: "0 8px", fontSize: "11px" }}
             title={
               drawingsHidden
                 ? "Show drawings for this symbol"
                 : "Hide drawings for this symbol"
             }
           >
-            {drawingsHidden ? "Show" : "Hide"}
+            {drawingsHidden ? "👁 Show" : "🙈 Hide"}
           </button>
 
           <button
@@ -132,15 +133,11 @@ export default function ChartPanel({
               }
             }}
             disabled={!hasDrawings}
-            style={{
-              ...controlButtonStyle,
-              color: hasDrawings ? "#d88d8d" : "#6b717c",
-              cursor: hasDrawings ? "pointer" : "not-allowed",
-              opacity: hasDrawings ? 1 : 0.65,
-            }}
+            className={`ui-button ${!hasDrawings ? "ui-button--disabled" : "ui-button--danger"}`}
+            style={{ height: "24px", padding: "0 8px", fontSize: "11px", opacity: hasDrawings ? 1 : 0.5, cursor: hasDrawings ? "pointer" : "not-allowed" }}
             title="Delete all drawings for this symbol"
           >
-            Clear
+            🗑 Clear
           </button>
         </div>
 
@@ -149,8 +146,9 @@ export default function ChartPanel({
             activeChart === chartId ? "chart-panel__focus--active" : ""
           }`}
           onClick={onFocus}
+          title="Expand to fullscreen"
         >
-          []
+          ⬜
         </button>
       </div>
 

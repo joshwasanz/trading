@@ -42,16 +42,7 @@ export default function Sidebar() {
         }}
         onMouseEnter={() => setHoveredItem(value)}
         onMouseLeave={() => setHoveredItem(null)}
-        style={{
-          width: "32px",
-          height: "32px",
-          background: tool === value ? "var(--panel-accent)" : "transparent",
-          color: tool === value ? "#fff" : "#aaa",
-          border: "1px solid #2a2d34",
-          borderRadius: "4px",
-          cursor: "pointer",
-          transition: "all 0.15s ease",
-        }}
+        className={`ui-button ${tool === value ? "ui-button--active" : ""}`}
         title={toolNames[value]}
       >
         {label}
@@ -64,13 +55,13 @@ export default function Sidebar() {
             left: "42px",
             top: "50%",
             transform: "translateY(-50%)",
-            background: "#1a1a1f",
-            color: "#d4d7de",
+            background: "var(--panel-bg)",
+            color: "var(--panel-text)",
             padding: "4px 8px",
             borderRadius: "4px",
             fontSize: "12px",
             whiteSpace: "nowrap",
-            border: "1px solid #2a2d34",
+            border: "1px solid var(--panel-border)",
             zIndex: 1000,
           }}
         >
@@ -82,10 +73,11 @@ export default function Sidebar() {
 
   return (
     <div
+      className="sidebar"
       style={{
         width: "48px",
-        background: "#0e0e11",
-        borderRight: "1px solid #2a2d34",
+        background: "var(--panel-bg)",
+        borderRight: "1px solid var(--panel-border)",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
@@ -108,16 +100,7 @@ export default function Sidebar() {
           }}
           onMouseEnter={() => setHoveredItem("magnet")}
           onMouseLeave={() => setHoveredItem(null)}
-          style={{
-            width: "32px",
-            height: "32px",
-            background: magnet ? "#f5a623" : "transparent",
-            border: "1px solid #2a2d34",
-            borderRadius: "4px",
-            color: magnet ? "#fff" : "#aaa",
-            cursor: "pointer",
-            transition: "all 0.15s ease",
-          }}
+          className={`ui-button ${magnet ? "ui-button--active" : ""}`}
           title={magnet ? "Magnet On" : "Magnet Off"}
         >
           M
@@ -130,13 +113,13 @@ export default function Sidebar() {
               left: "42px",
               top: "50%",
               transform: "translateY(-50%)",
-              background: "#1a1a1f",
-              color: "#d4d7de",
+              background: "var(--panel-bg)",
+              color: "var(--panel-text)",
               padding: "4px 8px",
               borderRadius: "4px",
               fontSize: "12px",
               whiteSpace: "nowrap",
-              border: "1px solid #2a2d34",
+              border: "1px solid var(--panel-border)",
               zIndex: 1000,
             }}
           >
@@ -149,10 +132,10 @@ export default function Sidebar() {
         style={{
           marginTop: "auto",
           fontSize: "10px",
-          color: "#7f8591",
+          color: "var(--panel-muted)",
           textAlign: "center",
           padding: "8px 4px",
-          borderTop: "1px solid #2a2d34",
+          borderTop: "1px solid var(--panel-border)",
           width: "100%",
           lineHeight: 1.4,
         }}

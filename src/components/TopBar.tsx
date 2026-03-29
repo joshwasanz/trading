@@ -15,60 +15,45 @@ export default function TopBar({
     <div className="top-bar">
 
       {/* ================= LAYOUT ================= */}
-      <div style={{ display: "flex", gap: "6px" }}>
-        {["2", "3", "6"].map((l) => (
-          <button
-            key={l}
-            onClick={() => setLayoutType(l)}
-            style={{
-              padding: "4px 10px",
-              borderRadius: "4px",
-              border: "1px solid #2a2d34",
-              background: layoutType === l ? "var(--panel-accent)" : "transparent",
-              color: layoutType === l ? "#fff" : "#ccc",
-              cursor: "pointer",
-              fontSize: "12px",
-            }}
-          >
-            {l} Charts
-          </button>
-        ))}
-      </div>
+      <select
+        value={layoutType}
+        onChange={(e) => setLayoutType(e.target.value)}
+        className="ui-dropdown"
+        title="Select layout"
+      >
+        <option value="2">2 Charts</option>
+        <option value="3">3 Charts</option>
+        <option value="6">6 Charts</option>
+      </select>
 
       {/* ================= THEME & PRESET ================= */}
-      <div style={{ marginLeft: "auto", display: "flex", gap: "8px", alignItems: "center" }}>
-        {/* Theme Toggle */}
-        <button
-          onClick={() => setMode(mode === "dark" ? "light" : "dark")}
-          style={{
-            padding: "4px 10px",
-            borderRadius: "4px",
-            border: "1px solid var(--panel-border)",
-            background: "transparent",
-            color: "var(--panel-muted)",
-            cursor: "pointer",
-            fontSize: "12px",
-            transition: "all 0.2s",
-          }}
-          title={mode === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
-        >
-          {mode === "dark" ? "☀️" : "🌙"}
-        </button>
+      <div style={{ marginLeft: "auto", display: "flex", gap: "4px", alignItems: "center" }}>
+        {/* Mode Toggle */}
+        <div style={{ display: "flex", gap: "2px", borderRadius: "8px", background: "rgba(255, 255, 255, 0.04)", padding: "2px" }}>
+          <button
+            onClick={() => setMode("dark")}
+            className={`ui-button ${mode === "dark" ? "ui-button--active" : ""}`}
+            style={{ height: "26px", padding: "0 8px" }}
+            title="Dark Mode"
+          >
+            🌙
+          </button>
+          <button
+            onClick={() => setMode("light")}
+            className={`ui-button ${mode === "light" ? "ui-button--active" : ""}`}
+            style={{ height: "26px", padding: "0 8px" }}
+            title="Light Mode"
+          >
+            ☀️
+          </button>
+        </div>
 
         {/* Theme Preset Selector */}
         <select
           value={preset}
           onChange={(e) => setPreset(e.target.value as "professional" | "premium" | "vibrant" | "monochrome" | "gold" | "ict")}
-          style={{
-            padding: "4px 6px",
-            borderRadius: "4px",
-            border: "1px solid var(--panel-border)",
-            background: "var(--panel-bg)",
-            color: "var(--panel-text)",
-            cursor: "pointer",
-            fontSize: "12px",
-          }}
-          title="Select theme preset"
+          className="ui-dropdown"
+          title="Select theme"
         >
           <option value="professional">Professional</option>
           <option value="premium">Premium</option>
