@@ -1,4 +1,5 @@
 import Chart from "../Chart";
+import type { ReplayStartPayload } from "../types/replay";
 import type {
   ChartDrawings,
   Drawing,
@@ -37,8 +38,12 @@ type Props = {
   onShowDrawings?: () => void;
   onClearDrawings?: () => void;
   isReplay?: boolean;
+  isReplaySelectingStart?: boolean;
+  replayStartTime?: number | null;
+  replayCursorTime?: number | null;
   replayIndex?: number;
   isReplaySync?: boolean;
+  onReplayStart?: (payload: ReplayStartPayload) => void;
   showSessions?: boolean;
 };
 
@@ -65,8 +70,12 @@ export default function ChartPanel({
   onShowDrawings,
   onClearDrawings,
   isReplay,
+  isReplaySelectingStart,
+  replayStartTime,
+  replayCursorTime,
   replayIndex,
   isReplaySync,
+  onReplayStart,
 }: Props) {
   const chartId = panelId;
   const hasDrawings =
@@ -183,8 +192,12 @@ export default function ChartPanel({
           magnet={magnet}
           hidden={drawingsHidden}
           isReplay={isReplay}
+          isReplaySelectingStart={isReplaySelectingStart}
+          replayStartTime={replayStartTime}
+          replayCursorTime={replayCursorTime}
           replayIndex={replayIndex}
           isReplaySync={isReplaySync}
+          onReplayStart={onReplayStart}
         />
       </div>
     </div>

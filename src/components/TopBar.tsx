@@ -3,12 +3,17 @@ import { useWorkspaceStore } from "../store/useWorkspaceStore";
 import { useLayoutState } from "../store/useLayoutState";
 import type { SessionKey } from "../types/sessions";
 import type { Workspace } from "../types/workspace";
+import { formatReplayTime } from "../utils/replayDisplay";
 
 type Props = {
   layoutType: string;
   setLayoutType: (layoutType: string) => void;
   isReplay?: boolean;
   setIsReplay?: (isReplay: boolean) => void;
+  isReplaySelectingStart?: boolean;
+  armReplaySelection?: () => void;
+  replayStartTime?: number | null;
+  replayCursorTime?: number | null;
   replayIndex?: number;
   stepForward?: () => void;
   stepBackward?: () => void;
@@ -32,6 +37,10 @@ export default function TopBar({
   setLayoutType,
   isReplay = false,
   setIsReplay,
+  isReplaySelectingStart = false,
+  armReplaySelection,
+  replayStartTime = null,
+  replayCursorTime = null,
   replayIndex = 0,
   stepForward,
   stepBackward,
@@ -49,6 +58,11 @@ export default function TopBar({
   const { mode, setMode, preset, setPreset } = useThemeStore();
   const { workspaces, activeWorkspaceId, setActiveWorkspace, saveWorkspace } = useWorkspaceStore();
   const { panels, drawingsBySymbol } = useLayoutState();
+  const replayReady = !isReplaySelectingStart && replayCursorTime !== null;
+  const replayStartLabel = formatReplayTime(replayStartTime);
+  const replayTimeLabel = replayReady
+    ? formatReplayTime(replayCursorTime)
+    : "Pick a candle to start";
 
   return (
     <div className="top-bar">
@@ -145,9 +159,25 @@ export default function TopBar({
           {isReplay && (
             <>
               <button
+                onClick={() => armReplaySelection?.()}
+                className={`ui-button ${isReplaySelectingStart ? "ui-button--active" : ""}`}
+                style={{ height: "28px", padding: "0 12px", fontSize: "12px" }}
+                title="Choose a replay start candle from the chart"
+              >
+                {isReplaySelectingStart ? "Pick Candle" : "Pick Start"}
+              </button>
+
+              <button
                 onClick={() => stepBackward?.()}
                 className="ui-button"
-                style={{ height: "28px", padding: "0 8px", fontSize: "14px" }}
+                disabled={!replayReady}
+                style={{
+                  height: "28px",
+                  padding: "0 8px",
+                  fontSize: "14px",
+                  opacity: replayReady ? 1 : 0.5,
+                  cursor: replayReady ? "pointer" : "not-allowed",
+                }}
                 title="Previous candle"
               >
                 ◀
@@ -156,7 +186,14 @@ export default function TopBar({
               <button
                 onClick={() => stepForward?.()}
                 className="ui-button"
-                style={{ height: "28px", padding: "0 8px", fontSize: "14px" }}
+                disabled={!replayReady}
+                style={{
+                  height: "28px",
+                  padding: "0 8px",
+                  fontSize: "14px",
+                  opacity: replayReady ? 1 : 0.5,
+                  cursor: replayReady ? "pointer" : "not-allowed",
+                }}
                 title="Next candle"
               >
                 ▶
@@ -165,7 +202,14 @@ export default function TopBar({
               <button
                 onClick={() => resetReplay?.()}
                 className="ui-button"
-                style={{ height: "28px", padding: "0 12px", fontSize: "12px" }}
+                disabled={!replayReady}
+                style={{
+                  height: "28px",
+                  padding: "0 12px",
+                  fontSize: "12px",
+                  opacity: replayReady ? 1 : 0.5,
+                  cursor: replayReady ? "pointer" : "not-allowed",
+                }}
                 title="Reset to start"
               >
                 Reset
@@ -175,7 +219,14 @@ export default function TopBar({
               <button
                 onClick={() => setIsPlaying?.(!isPlaying)}
                 className={`ui-button ${isPlaying ? "ui-button--active" : ""}`}
-                style={{ height: "28px", padding: "0 10px", fontSize: "14px" }}
+                disabled={!replayReady}
+                style={{
+                  height: "28px",
+                  padding: "0 10px",
+                  fontSize: "14px",
+                  opacity: replayReady ? 1 : 0.5,
+                  cursor: replayReady ? "pointer" : "not-allowed",
+                }}
                 title={isPlaying ? "Pause autoplay" : "Start autoplay"}
               >
                 {isPlaying ? "⏸" : "▶️"}
@@ -187,6 +238,7 @@ export default function TopBar({
                   value={playSpeed}
                   onChange={(e) => setPlaySpeed?.(parseFloat(e.target.value) as 0.5 | 1 | 2 | 5)}
                   className="ui-dropdown"
+                  disabled={!replayReady}
                   style={{ height: "28px", fontSize: "12px" }}
                   title="Playback speed"
                 >
@@ -232,6 +284,14 @@ export default function TopBar({
 
               <span style={{ fontSize: "12px", color: "var(--panel-muted)", marginLeft: "4px" }}>
                 Index: {replayIndex}
+              </span>
+
+              <span style={{ fontSize: "12px", color: "var(--panel-muted)" }}>
+                {isReplaySelectingStart ? "Click a candle on any chart" : `Start: ${replayStartLabel}`}
+              </span>
+
+              <span style={{ fontSize: "12px", color: "var(--panel-muted)" }}>
+                {isReplaySelectingStart ? "Select start candle..." : `Current: ${replayTimeLabel}`}
               </span>
             </>
           )}

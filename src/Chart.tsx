@@ -13,6 +13,8 @@ import { useToolStore } from "./store/useToolStore";
 import { useThemeStore } from "./store/useThemeStore";
 import { useCandleStore } from "./store/useCandleStore";
 import DrawingStylePanel from "./components/DrawingStylePanel";
+import type { ReplayStartPayload } from "./types/replay";
+import { formatReplayTime } from "./utils/replayDisplay";
 import {
   DEFAULT_TRENDLINE_EXTENSION,
   createDrawingId,
@@ -27,6 +29,7 @@ import {
   isPointDrawing,
   isTextDrawing,
 } from "./types/drawings";
+import { findCandleIndexAtOrBefore } from "./utils/replay";
 
 type Candle = {
   time: number;
@@ -42,7 +45,7 @@ type Props = {
   setActiveChart?: (id: string) => void;
   chartId: string;
   symbol: string;
-  timeframe: string;
+  timeframe: ReplayStartPayload["timeframe"];
   drawings: ChartDrawings;
   onAddTrendline: (line: Trendline) => void;
   onAddRectangle: (rect: Rectangle) => void;
@@ -53,8 +56,12 @@ type Props = {
   magnet?: boolean;
   hidden?: boolean;
   isReplay?: boolean;
+  isReplaySelectingStart?: boolean;
+  replayStartTime?: number | null;
+  replayCursorTime?: number | null;
   replayIndex?: number;
   isReplaySync?: boolean;
+  onReplayStart?: (payload: ReplayStartPayload) => void;
 };
 
 type ScreenPoint = {
@@ -299,6 +306,48 @@ function pointHitsBounds(
   );
 }
 
+function getCandleAtOrBefore(data: Candle[], timestamp: number | null): Candle | null {
+  if (timestamp === null || data.length === 0) return null;
+  if (timestamp < data[0].time) return null;
+
+  const index = findCandleIndexAtOrBefore(data, timestamp);
+  const candle = data[index] ?? null;
+  return candle && candle.time <= timestamp ? candle : null;
+}
+
+function drawReplayVerticalMarker(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  height: number,
+  color: string,
+  label: string,
+  dpr: number,
+  dashed: boolean,
+  offsetY = 8
+) {
+  const boxX = Math.min(x + 6 * dpr, Math.max(0, x));
+  const boxY = offsetY * dpr;
+  const boxWidth = 58 * dpr;
+  const boxHeight = 18 * dpr;
+
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.25 * dpr;
+  ctx.setLineDash(dashed ? [6 * dpr, 4 * dpr] : []);
+  ctx.beginPath();
+  ctx.moveTo(x, 0);
+  ctx.lineTo(x, height);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = color;
+  ctx.fillRect(boxX, boxY, boxWidth, boxHeight);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `${11 * dpr}px sans-serif`;
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, boxX + 8 * dpr, boxY + boxHeight / 2);
+  ctx.restore();
+}
+
 export default function Chart({
   data,
   activeChart,
@@ -316,8 +365,12 @@ export default function Chart({
   magnet = false,
   hidden = false,
   isReplay = false,
+  isReplaySelectingStart = false,
+  replayStartTime = null,
+  replayCursorTime = null,
   replayIndex = 0,
   isReplaySync = false,
+  onReplayStart,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -332,9 +385,17 @@ export default function Chart({
   const pendingInitialFitRef = useRef(false);
   const chartReadyRef = useRef(false);
   const activeChartRef = useRef<string | null>(null);
+  const symbolRef = useRef(symbol);
+  const timeframeRef = useRef(timeframe);
   const toolRef = useRef(tool);
   const magnetRef = useRef(magnet);
   const hiddenRef = useRef(hidden);
+  const isReplayRef = useRef(isReplay);
+  const isReplaySyncRef = useRef(isReplaySync);
+  const isReplaySelectingStartRef = useRef(isReplaySelectingStart);
+  const replayStartTimeRef = useRef(replayStartTime);
+  const replayCursorTimeRef = useRef(replayCursorTime);
+  const candleStoreDataRef = useRef<Record<string, Record<string, Candle[]>>>({});
   const dataRef = useRef(data);
   const drawingsRef = useRef(drawings);
   const selectedDrawingRef = useRef<DrawingSelection | null>(null);
@@ -343,6 +404,7 @@ export default function Chart({
   const onAddTextRef = useRef(onAddText);
   const onDeleteDrawingRef = useRef(onDeleteDrawing);
   const onUpdateDrawingRef = useRef(onUpdateDrawing);
+  const onReplayStartRef = useRef(onReplayStart);
 
   const drawStartRef = useRef<Point | null>(null);
   const drawPreviewRef = useRef<Point | null>(null);
@@ -360,6 +422,13 @@ export default function Chart({
   const [drawingStep, setDrawingStep] = useState<"none" | "started">("none");
   const [selectedDrawing, setSelectedDrawing] = useState<DrawingSelection | null>(null);
   const [chartReady, setChartReady] = useState(false);
+  const fullData: Candle[] = data.length > 0 ? data : candleStoreData[symbol]?.[timeframe] ?? [];
+  const replayActiveForThisChart = Boolean(isReplay && (isReplaySync || activeChart === chartId));
+  const hasNoEarlierReplayData = Boolean(
+    replayActiveForThisChart &&
+      replayStartTime !== null &&
+      (fullData.length === 0 || replayStartTime < fullData[0].time)
+  );
 
   useEffect(() => {
     toolRef.current = tool;
@@ -374,12 +443,44 @@ export default function Chart({
   }, [hidden]);
 
   useEffect(() => {
+    isReplayRef.current = isReplay;
+  }, [isReplay]);
+
+  useEffect(() => {
+    isReplaySyncRef.current = isReplaySync;
+  }, [isReplaySync]);
+
+  useEffect(() => {
+    isReplaySelectingStartRef.current = isReplaySelectingStart;
+  }, [isReplaySelectingStart]);
+
+  useEffect(() => {
+    replayStartTimeRef.current = replayStartTime;
+  }, [replayStartTime]);
+
+  useEffect(() => {
+    replayCursorTimeRef.current = replayCursorTime;
+  }, [replayCursorTime]);
+
+  useEffect(() => {
     dataRef.current = data;
   }, [data]);
 
   useEffect(() => {
+    candleStoreDataRef.current = candleStoreData;
+  }, [candleStoreData]);
+
+  useEffect(() => {
     activeChartRef.current = activeChart ?? null;
   }, [activeChart]);
+
+  useEffect(() => {
+    symbolRef.current = symbol;
+  }, [symbol]);
+
+  useEffect(() => {
+    timeframeRef.current = timeframe;
+  }, [timeframe]);
 
   useEffect(() => {
     drawingsRef.current = drawings;
@@ -408,6 +509,10 @@ export default function Chart({
   useEffect(() => {
     onUpdateDrawingRef.current = onUpdateDrawing;
   }, [onUpdateDrawing]);
+
+  useEffect(() => {
+    onReplayStartRef.current = onReplayStart;
+  }, [onReplayStart]);
 
   const setChartReadyState = useCallback((ready: boolean) => {
     if (chartReadyRef.current === ready) return;
@@ -667,7 +772,10 @@ export default function Chart({
     if (typeof param.logical !== "number") return null;
 
     const index = Math.round(param.logical);
-    const candles = dataRef.current;
+    const candles =
+      dataRef.current.length > 0
+        ? dataRef.current
+        : candleStoreDataRef.current[symbolRef.current]?.[timeframeRef.current] ?? [];
     if (index < 0 || index >= candles.length) return null;
 
     return candles[index] ?? null;
@@ -716,6 +824,7 @@ export default function Chart({
   }, []);
 
   const getDefaultCursor = useCallback(() => {
+    if (isReplaySelectingStartRef.current) return "crosshair";
     if (hiddenRef.current) return "";
 
     return toolRef.current === "trendline" ||
@@ -755,6 +864,73 @@ export default function Chart({
     setContainerCursor(getDefaultCursor());
   }, [getDefaultCursor, setContainerCursor, setPressedNavigationEnabled]);
 
+  const drawReplayOverlay = useCallback(
+    (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, dpr: number) => {
+      const chart = chartRef.current;
+      if (!chart) return;
+
+      const currentData =
+        dataRef.current.length > 0
+          ? dataRef.current
+          : candleStoreDataRef.current[symbolRef.current]?.[timeframeRef.current] ?? [];
+      const replayActive = Boolean(
+        isReplayRef.current &&
+          (isReplaySyncRef.current || activeChartRef.current === chartId)
+      );
+      const replayStart = replayStartTimeRef.current;
+      const replayCursor = replayCursorTimeRef.current;
+      const hasNoEarlierData =
+        replayActive &&
+        replayStart !== null &&
+        (currentData.length === 0 || replayStart < currentData[0].time);
+
+      if (!replayActive || isReplaySelectingStartRef.current || hasNoEarlierData) {
+        return;
+      }
+
+      const timeScale = chart.timeScale();
+      const accentColor =
+        getComputedStyle(document.documentElement)
+          .getPropertyValue("--panel-accent")
+          .trim() || "#4da3ff";
+      const anchor = getCandleAtOrBefore(currentData, replayStart);
+      const cursor = getCandleAtOrBefore(currentData, replayCursor);
+
+      if (anchor) {
+        const anchorX = timeScale.timeToCoordinate(anchor.time as UTCTimestamp);
+        if (anchorX !== null) {
+          drawReplayVerticalMarker(
+            ctx,
+            anchorX * dpr,
+            canvas.height,
+            "#f59e0b",
+            "START",
+            dpr,
+            true,
+            8
+          );
+        }
+      }
+
+      if (cursor) {
+        const cursorX = timeScale.timeToCoordinate(cursor.time as UTCTimestamp);
+        if (cursorX !== null) {
+          drawReplayVerticalMarker(
+            ctx,
+            cursorX * dpr,
+            canvas.height,
+            accentColor,
+            "NOW",
+            dpr,
+            false,
+            anchor ? 30 : 8
+          );
+        }
+      }
+    },
+    [chartId]
+  );
+
   const drawOverlay = useCallback(() => {
     const canvas = overlayRef.current;
     if (!canvas || !chartReadyRef.current) return;
@@ -766,6 +942,7 @@ export default function Chart({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     if (hiddenRef.current) {
+      drawReplayOverlay(ctx, canvas, dpr);
       return;
     }
 
@@ -923,7 +1100,9 @@ export default function Chart({
       }
     }
     ctx.restore();
-  }, [pointToScreen]);
+
+    drawReplayOverlay(ctx, canvas, dpr);
+  }, [drawReplayOverlay, pointToScreen]);
 
   const scheduleOverlayDraw = useCallback(() => {
     if (overlayFrameRef.current !== null) return;
@@ -967,6 +1146,18 @@ export default function Chart({
     clearDrawing();
     setDrawingStep("none");
   }, [tool, clearDrawing]);
+
+  useEffect(() => {
+    if (!isReplaySelectingStart) return;
+
+    resetDragState();
+    drawStartRef.current = null;
+    drawPreviewRef.current = null;
+    selectedDrawingRef.current = null;
+    setDrawingStep("none");
+    setSelectedDrawing(null);
+    scheduleOverlayDraw();
+  }, [isReplaySelectingStart, resetDragState, scheduleOverlayDraw]);
 
   useEffect(() => {
     if (!hidden) {
@@ -1030,7 +1221,7 @@ export default function Chart({
     if (!isDraggingRef.current) {
       setContainerCursor(getDefaultCursor());
     }
-  }, [getDefaultCursor, setContainerCursor, tool]);
+  }, [getDefaultCursor, isReplaySelectingStart, setContainerCursor, tool]);
 
   useEffect(() => {
     if (!chartRef.current) return;
@@ -1198,6 +1389,10 @@ export default function Chart({
       setActiveChart?.(chartId);
       activeChartRef.current = chartId;
 
+      if (isReplaySelectingStartRef.current) {
+        return;
+      }
+
       if (hiddenRef.current) {
         return;
       }
@@ -1302,6 +1497,13 @@ export default function Chart({
       try {
         const rawPoint = getRawPointFromParam(param);
         const snappedPoint = getSnappedPointFromParam(param);
+
+        if (isReplaySelectingStartRef.current) {
+          if (!isDraggingRef.current) {
+            setContainerCursor("crosshair");
+          }
+          return;
+        }
 
         if (hiddenRef.current) {
           if (!isDraggingRef.current) {
@@ -1433,12 +1635,33 @@ export default function Chart({
           return;
         }
 
+        if (!param.point) return;
+
+        setActiveChart?.(chartId);
+        activeChartRef.current = chartId;
+
+        if (isReplaySelectingStartRef.current) {
+          const nearestCandle = getNearestCandle(param);
+          const rawPoint = getRawPointFromParam(param);
+          const timestamp =
+            nearestCandle?.time ??
+            (typeof rawPoint?.time === "number" ? Number(rawPoint.time) : null);
+
+          if (timestamp !== null) {
+            onReplayStartRef.current?.({
+              panelId: chartId,
+              symbol: symbolRef.current,
+              timeframe: timeframeRef.current,
+              timestamp,
+            });
+          }
+          return;
+        }
+
         if (hiddenRef.current) {
           scheduleOverlayDraw();
           return;
         }
-
-        if (!param.point) return;
 
         const dpr = window.devicePixelRatio || 1;
         const screenPoint = {
@@ -1588,6 +1811,7 @@ export default function Chart({
     chartId,
     getDefaultCursor,
     getDrawingBySelection,
+    getNearestCandle,
     getRectangleEdgeResizePoints,
     getRawPointFromParam,
     getSnappedPointFromParam,
@@ -1621,14 +1845,23 @@ export default function Chart({
         ? data
         : candlesFromStore;
 
-      // Apply replay slicing if in replay mode
-      // Safety: bound replayIndex to actual data length to prevent blank charts on symbol/timeframe switches
-      // If sync is OFF, only apply replay to the active chart; otherwise all charts show replay data
-      const shouldApplyReplay = isReplay && replayIndex > 0 && (isReplaySync || activeChart === chartId);
-      
-      if (shouldApplyReplay) {
-        const safeIndex = Math.min(replayIndex, displayData.length);
-        displayData = displayData.slice(0, safeIndex);
+      // When replay selection is armed, keep the full chart visible so the user can pick any candle.
+      const shouldApplyReplay =
+        isReplay &&
+        !isReplaySelectingStart &&
+        !hasNoEarlierReplayData &&
+        (isReplaySync
+          ? replayCursorTime !== null
+          : activeChart === chartId);
+
+      if (shouldApplyReplay && displayData.length > 0) {
+        if (isReplaySync && replayCursorTime !== null) {
+          const replayEndIndex = findCandleIndexAtOrBefore(displayData, replayCursorTime);
+          displayData = displayData.slice(0, replayEndIndex + 1);
+        } else {
+          const safeIndex = Math.max(0, Math.min(replayIndex, displayData.length - 1));
+          displayData = displayData.slice(0, safeIndex + 1);
+        }
       }
 
       const nextData = displayData.map((candle) => ({
@@ -1660,7 +1893,7 @@ export default function Chart({
     } catch (error) {
       console.error("[Chart] setData error:", error);
     }
-  }, [data, candleStoreData, symbol, timeframe, isReplay, replayIndex, isReplaySync, activeChart, chartId, scheduleOverlayDraw]);
+  }, [data, candleStoreData, symbol, timeframe, isReplay, isReplaySelectingStart, replayStartTime, replayCursorTime, replayIndex, isReplaySync, activeChart, chartId, hasNoEarlierReplayData, scheduleOverlayDraw]);
 
   useEffect(() => {
     scheduleOverlayDraw();
@@ -1681,7 +1914,64 @@ export default function Chart({
         }}
       />
 
-      {hidden && (
+      {isReplay && !isReplaySelectingStart && (
+        <div
+          style={{
+            position: "absolute",
+            top: "8px",
+            right: "8px",
+            zIndex: 10,
+            pointerEvents: "none",
+            minWidth: "220px",
+            padding: "8px 10px",
+            borderRadius: "8px",
+            background: "rgba(19, 21, 26, 0.92)",
+            border: "1px solid var(--panel-border)",
+            color: "var(--panel-text)",
+            fontSize: "11px",
+            lineHeight: 1.5,
+            boxShadow: "0 8px 18px rgba(0, 0, 0, 0.24)",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: "4px",
+            }}
+          >
+            <strong
+              style={{
+                color: replayActiveForThisChart ? "var(--panel-accent)" : "var(--panel-muted)",
+              }}
+            >
+              {replayActiveForThisChart ? "Replay Active" : "Replay Idle"}
+            </strong>
+            <span style={{ color: "var(--panel-muted)" }}>
+              {symbol.toUpperCase()} · {timeframe}
+            </span>
+          </div>
+
+          <div>
+            <span style={{ color: "var(--panel-muted)" }}>Start: </span>
+            <span>{formatReplayTime(replayStartTime)}</span>
+          </div>
+
+          <div>
+            <span style={{ color: "var(--panel-muted)" }}>Now: </span>
+            <span>{formatReplayTime(replayCursorTime)}</span>
+          </div>
+
+          {isReplaySync && (
+            <div style={{ color: "var(--panel-muted)", marginTop: "2px" }}>
+              Sync: timestamp-linked
+            </div>
+          )}
+        </div>
+      )}
+
+      {hidden && !isReplaySelectingStart && (
         <div
           style={{
             position: "absolute",
@@ -1701,7 +1991,78 @@ export default function Chart({
         </div>
       )}
 
-      {!hidden && (tool === "trendline" || tool === "rectangle") && (
+      {isReplay && isReplaySelectingStart && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 11,
+            pointerEvents: "none",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(8, 10, 14, 0.08)",
+          }}
+        >
+          <div
+            style={{
+              padding: "10px 14px",
+              borderRadius: "10px",
+              background: "rgba(19, 21, 26, 0.94)",
+              border: "1px solid var(--panel-border)",
+              color: "var(--panel-text)",
+              fontSize: "12px",
+              fontWeight: 600,
+              boxShadow: "0 8px 20px rgba(0,0,0,0.22)",
+            }}
+          >
+            Click a candle to set replay start
+          </div>
+        </div>
+      )}
+
+      {isReplay && !isReplaySelectingStart && hasNoEarlierReplayData && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 12,
+            pointerEvents: "none",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(8, 10, 14, 0.20)",
+          }}
+        >
+          <div
+            style={{
+              padding: "12px 16px",
+              borderRadius: "10px",
+              background: "rgba(28, 31, 38, 0.95)",
+              border: "1px solid rgba(239, 83, 80, 0.35)",
+              color: "#ef5350",
+              fontSize: "12px",
+              fontWeight: 600,
+              textAlign: "center",
+              boxShadow: "0 8px 20px rgba(0,0,0,0.24)",
+            }}
+          >
+            No earlier data for this panel
+            <div
+              style={{
+                marginTop: "6px",
+                color: "var(--panel-muted)",
+                fontWeight: 400,
+                fontSize: "11px",
+              }}
+            >
+              Choose a later replay start or load more history
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!isReplaySelectingStart && !hidden && (tool === "trendline" || tool === "rectangle") && (
         <div
           style={{
             position: "absolute",
@@ -1729,7 +2090,7 @@ export default function Chart({
         </div>
       )}
 
-      {!hidden && tool === "text" && (
+      {!isReplaySelectingStart && !hidden && tool === "text" && (
         <div
           style={{
             position: "absolute",

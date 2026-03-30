@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import TopBar from "./components/TopBar";
@@ -11,7 +11,9 @@ import { useWorkspaceStore } from "./store/useWorkspaceStore";
 import { useCandleStore } from "./store/useCandleStore";
 import { useLayoutState } from "./store/useLayoutState";
 import { EMPTY_CHART_DRAWINGS } from "./types/drawings";
+import type { ReplayStartPayload } from "./types/replay";
 import { getSessionRange, type SessionKey } from "./types/sessions";
+import { findCandleIndexAtOrBefore } from "./utils/replay";
 
 type Candle = {
   symbol: string;
@@ -174,6 +176,7 @@ function findIndexByTime(data: Candle[], targetTime: number): number {
 
   return left; // nearest future candle
 }
+void findIndexByTime;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -186,11 +189,13 @@ function AppInner() {
   
   // Replay engine state
   const [isReplay, setIsReplay] = useState(false);
+  const [isReplaySelectingStart, setIsReplaySelectingStart] = useState(false);
+  const [replayStartTime, setReplayStartTime] = useState<number | null>(null);
+  const [replayCursorTime, setReplayCursorTime] = useState<number | null>(null);
   const [replayIndex, setReplayIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState<0.5 | 1 | 2 | 5>(1);
   const [isReplaySync, setIsReplaySync] = useState(false);
-  const [activeChartReplayIndex, setActiveChartReplayIndex] = useState(0);
   const [jumpTime, setJumpTime] = useState("");
   const [showSessions, setShowSessions] = useState(false);
 
@@ -201,51 +206,154 @@ function AppInner() {
   const { setData: setCandleData } = useCandleStore();
   const panels = useLayoutState((state) => state.panels);
 
-  // Helper: get maximum data length across all symbol/timeframe combos
-  const getMaxDataLength = () => {
-    let max = 0;
-    const symbols = ["nq", "es"];
-    const timeframes = ["15s", "1m", "3m"] as const;
-    
-    for (const symbol of symbols) {
-      for (const tf of timeframes) {
-        const length = data[symbol]?.[tf]?.length ?? 0;
-        max = Math.max(max, length);
+  const getReplayPanelState = useCallback(
+    (panelId: string | null) => {
+      if (!panelId) return null;
+
+      const panel = panels.find((candidate) => candidate.id === panelId);
+      if (!panel) return null;
+
+      return {
+        panel,
+        candles: data[panel.symbol]?.[panel.timeframe] ?? [],
+      };
+    },
+    [data, panels]
+  );
+
+  const resolveReplayPosition = useCallback(
+    (panelId: string | null, targetTime: number) => {
+      const panelState = getReplayPanelState(panelId);
+      if (!panelState || panelState.candles.length === 0) return null;
+
+      const index = findCandleIndexAtOrBefore(panelState.candles, targetTime);
+      const timestamp = panelState.candles[index]?.time ?? targetTime;
+
+      return {
+        ...panelState,
+        index,
+        timestamp,
+      };
+    },
+    [getReplayPanelState]
+  );
+
+  const moveReplayCursor = useCallback(
+    (direction: -1 | 1) => {
+      if (!isReplay || isReplaySelectingStart || !activeChart) return false;
+
+      const panelState = getReplayPanelState(activeChart);
+      if (!panelState || panelState.candles.length === 0) return false;
+
+      const currentIndex =
+        isReplaySync && replayCursorTime !== null
+          ? findCandleIndexAtOrBefore(panelState.candles, replayCursorTime)
+          : Math.max(0, Math.min(replayIndex, panelState.candles.length - 1));
+      const nextIndex = Math.max(
+        0,
+        Math.min(panelState.candles.length - 1, currentIndex + direction)
+      );
+
+      if (nextIndex === currentIndex) {
+        return false;
       }
+
+      const nextTimestamp = panelState.candles[nextIndex]?.time;
+      if (typeof nextTimestamp !== "number") {
+        return false;
+      }
+
+      setReplayIndex(nextIndex);
+      setReplayCursorTime(nextTimestamp);
+      return true;
+    },
+    [
+      activeChart,
+      getReplayPanelState,
+      isReplay,
+      isReplaySelectingStart,
+      isReplaySync,
+      replayCursorTime,
+      replayIndex,
+    ]
+  );
+
+  const stepForward = useCallback(() => {
+    moveReplayCursor(1);
+  }, [moveReplayCursor]);
+
+  const stepBackward = useCallback(() => {
+    moveReplayCursor(-1);
+  }, [moveReplayCursor]);
+
+  const resetReplay = useCallback(() => {
+    if (!activeChart || replayStartTime === null) return;
+
+    const resolved = resolveReplayPosition(activeChart, replayStartTime);
+    if (!resolved) return;
+
+    setIsPlaying(false);
+    setReplayIndex(resolved.index);
+    setReplayCursorTime(resolved.timestamp);
+  }, [activeChart, replayStartTime, resolveReplayPosition]);
+
+  const handleReplayToggle = useCallback((nextIsReplay: boolean) => {
+    setIsPlaying(false);
+
+    if (!nextIsReplay) {
+      setIsReplay(false);
+      setIsReplaySelectingStart(false);
+      setReplayStartTime(null);
+      setReplayCursorTime(null);
+      setReplayIndex(0);
+      return;
     }
-    return max;
-  };
 
-  // Replay engine control functions
-  const stepForward = () => {
-    const maxLength = getMaxDataLength();
-    setReplayIndex((i) => Math.min(i + 1, Math.max(0, maxLength - 1)));
-  };
+    setIsReplay(true);
+    setIsReplaySelectingStart(true);
+    setReplayStartTime(null);
+    setReplayCursorTime(null);
+    setReplayIndex(0);
+  }, []);
 
-  const stepBackward = () => {
-    setReplayIndex((i) => Math.max(0, i - 1));
-  };
+  const armReplaySelection = useCallback(() => {
+    setIsReplay(true);
+    setIsPlaying(false);
+    setIsReplaySelectingStart(true);
+  }, []);
 
-  const resetReplay = () => {
-    const maxLength = getMaxDataLength();
-    setReplayIndex(Math.min(100, Math.max(0, maxLength - 1)));
-  };
+  const handleReplayStart = useCallback(
+    (payload: ReplayStartPayload) => {
+      const resolved = resolveReplayPosition(payload.panelId, payload.timestamp);
+      if (!resolved) return;
+
+      setActiveChart(payload.panelId);
+      setIsReplay(true);
+      setIsReplaySelectingStart(false);
+      setIsPlaying(false);
+      setReplayStartTime(resolved.timestamp);
+      setReplayCursorTime(resolved.timestamp);
+      setReplayIndex(resolved.index);
+    },
+    [resolveReplayPosition]
+  );
 
   // Jump to specific time: find candle by UNIX timestamp and move replay index
   const goToTime = (targetTime: number) => {
     if (!activeChart) return;
 
-    const activePanel = panels.find((panel) => panel.id === activeChart);
-    if (!activePanel) return;
+    const resolved = resolveReplayPosition(activeChart, targetTime);
+    if (!resolved) return;
 
-    const { symbol, timeframe: tf } = activePanel;
-
-    const series = data[symbol]?.[tf];
-    if (!series || series.length === 0) return;
-
-    const index = findIndexByTime(series, targetTime);
-    setReplayIndex(index);
-    console.log(`[Jump to Time] Moved to index ${index} (timestamp ${targetTime})`);
+    setIsReplay(true);
+    setIsReplaySelectingStart(false);
+    setIsPlaying(false);
+    setReplayIndex(resolved.index);
+    setReplayCursorTime(resolved.timestamp);
+    setReplayStartTime((current) => current ?? resolved.timestamp);
+    console.log(
+      `[Jump to Time] Moved to index ${resolved.index} (timestamp ${resolved.timestamp})`
+    );
   };
 
   // Jump to session start time (e.g., "london", "newyork")
@@ -255,17 +363,9 @@ function AppInner() {
     goToTime(start);
   };
 
-  // When entering replay mode, jump to last candle (pause at current market state)
-  useEffect(() => {
-    if (isReplay) {
-      const maxLength = getMaxDataLength();
-      setReplayIndex(Math.max(0, maxLength - 1)); // freeze at last available candle
-    }
-  }, [isReplay]);
-
   // Autoplay: step forward at intervals based on playSpeed
   useEffect(() => {
-    if (!isPlaying || !isReplay) return;
+    if (!isPlaying || !isReplay || isReplaySelectingStart) return;
 
     // Calculate interval based on speed (in ms per candle)
     const speedIntervals: Record<0.5 | 1 | 2 | 5, number> = {
@@ -276,39 +376,27 @@ function AppInner() {
     };
 
     const interval = setInterval(() => {
-      setReplayIndex((i) => {
-        const maxLength = getMaxDataLength();
-        const nextIndex = i + 1;
-        // Auto-stop when reaching end
-        if (nextIndex >= maxLength - 1) {
-          setIsPlaying(false);
-          return Math.max(0, maxLength - 1);
-        }
-        return nextIndex;
-      });
+      const moved = moveReplayCursor(1);
+      if (!moved) {
+        setIsPlaying(false);
+      }
     }, speedIntervals[playSpeed]);
 
     return () => clearInterval(interval);
-  }, [isPlaying, isReplay, playSpeed]);
+  }, [isPlaying, isReplay, isReplaySelectingStart, moveReplayCursor, playSpeed]);
 
-  // Track active chart's position when in independent (sync OFF) mode
   useEffect(() => {
-    if (!isReplaySync && isReplay && activeChart) {
-      // Capture active chart's current replay position
-      setActiveChartReplayIndex(replayIndex);
-    }
-  }, [replayIndex, isReplay, isReplaySync, activeChart]);
+    if (!isReplay || !isReplaySync || replayCursorTime !== null || !activeChart) return;
 
-  // SYNC TOGGLE ALIGNMENT: Align all charts to active chart's position when sync toggles ON
-  useEffect(() => {
-    if (isReplaySync && isReplay && activeChart) {
-      // When enabling sync, snap all charts to active chart's current position
-      // Use explicit fallback: activeChartReplayIndex > global replayIndex > 0
-      const targetIndex = activeChartReplayIndex || replayIndex || 0;
-      setReplayIndex(targetIndex);
-      console.log(`[Replay Sync] Aligned all charts to ${activeChart} at index ${targetIndex}`);
+    const panelState = getReplayPanelState(activeChart);
+    if (!panelState || panelState.candles.length === 0) return;
+
+    const safeIndex = Math.max(0, Math.min(replayIndex, panelState.candles.length - 1));
+    const timestamp = panelState.candles[safeIndex]?.time;
+    if (typeof timestamp === "number") {
+      setReplayCursorTime(timestamp);
     }
-  }, [isReplaySync, activeChart, isReplay, activeChartReplayIndex, replayIndex]);
+  }, [activeChart, getReplayPanelState, isReplay, isReplaySync, replayCursorTime, replayIndex]);
 
   // Keep dataRef in sync with state (including historical loads)
   useEffect(() => {
@@ -473,7 +561,11 @@ function AppInner() {
           layoutType={layoutType}
           setLayoutType={setLayoutType}
           isReplay={isReplay}
-          setIsReplay={setIsReplay}
+          setIsReplay={handleReplayToggle}
+          isReplaySelectingStart={isReplaySelectingStart}
+          armReplaySelection={armReplaySelection}
+          replayStartTime={replayStartTime}
+          replayCursorTime={replayCursorTime}
           replayIndex={replayIndex}
           stepForward={stepForward}
           stepBackward={stepBackward}
@@ -505,8 +597,12 @@ function AppInner() {
             tool={tool}
             magnet={magnet}
             isReplay={isReplay}
+            isReplaySelectingStart={isReplaySelectingStart}
+            replayStartTime={replayStartTime}
+            replayCursorTime={replayCursorTime}
             replayIndex={replayIndex}
             isReplaySync={isReplaySync}
+            onReplayStart={handleReplayStart}
             showSessions={showSessions}
           />
         </div>

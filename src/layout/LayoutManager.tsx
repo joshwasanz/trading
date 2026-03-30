@@ -245,8 +245,12 @@ export default function LayoutManager({
   tool,
   magnet,
   isReplay,
+  isReplaySelectingStart,
+  replayStartTime,
+  replayCursorTime,
   replayIndex,
   isReplaySync,
+  onReplayStart,
   showSessions,
 }: any) {
   const [vSplit, setVSplit] = useState(0.5);
@@ -470,8 +474,12 @@ export default function LayoutManager({
       onSymbolChange={(symbol) => updatePanel(panel.id, { symbol })}
       onTimeframeChange={(timeframe) => updatePanel(panel.id, { timeframe })}
       isReplay={isReplay}
+      isReplaySelectingStart={isReplaySelectingStart}
+      replayStartTime={replayStartTime}
+      replayCursorTime={replayCursorTime}
       replayIndex={replayIndex}
       isReplaySync={isReplaySync}
+      onReplayStart={onReplayStart}
       showSessions={showSessions}
       {...sharedProps}
     />
