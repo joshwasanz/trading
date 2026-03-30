@@ -1,8 +1,8 @@
-import type { Drawing } from "../types/drawings";
+import type { BaseStyle, Drawing } from "../types/drawings";
 
 type Props = {
   drawing: Drawing | null;
-  onUpdate: (patch: Partial<Drawing>) => void;
+  onUpdate: (patch: Partial<BaseStyle>) => void;
 };
 
 export default function DrawingStylePanel({ drawing, onUpdate }: Props) {

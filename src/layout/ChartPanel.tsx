@@ -39,6 +39,7 @@ type Props = {
   isReplay?: boolean;
   replayIndex?: number;
   isReplaySync?: boolean;
+  showSessions?: boolean;
 };
 
 export default function ChartPanel({
@@ -162,11 +163,12 @@ export default function ChartPanel({
         <Chart
           data={data}
           chartId={chartId}
-          seriesKey={`${symbol}_${timeframe}`}
+          symbol={symbol}
+          timeframe={timeframe}
           drawings={drawings}
-          onAddTrendline={(_, line) => onAddTrendline(symbol, line)}
-          onAddRectangle={(_, rect) => onAddRectangle(symbol, rect)}
-          onAddText={(_, text) => onAddText(symbol, text)}
+          onAddTrendline={(line) => onAddTrendline(symbol, line)}
+          onAddRectangle={(rect) => onAddRectangle(symbol, rect)}
+          onAddText={(text) => onAddText(symbol, text)}
           onDeleteDrawing={
             onDeleteDrawing ? (id) => onDeleteDrawing(symbol, id) : undefined
           }

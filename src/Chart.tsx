@@ -24,6 +24,8 @@ import {
   type Rectangle,
   type TextDrawing,
   type Trendline,
+  isPointDrawing,
+  isTextDrawing,
 } from "./types/drawings";
 
 type Candle = {
@@ -39,11 +41,12 @@ type Props = {
   activeChart?: string | null;
   setActiveChart?: (id: string) => void;
   chartId: string;
-  seriesKey: string;
+  symbol: string;
+  timeframe: string;
   drawings: ChartDrawings;
-  onAddTrendline: (chartId: string, line: Trendline) => void;
-  onAddRectangle: (chartId: string, rect: Rectangle) => void;
-  onAddText: (chartId: string, text: TextDrawing) => void;
+  onAddTrendline: (line: Trendline) => void;
+  onAddRectangle: (rect: Rectangle) => void;
+  onAddText: (text: TextDrawing) => void;
   onDeleteDrawing?: (id: string) => void;
   onUpdateDrawing?: (selection: DrawingSelection, drawing: Drawing) => void;
   tool?: string | null;
@@ -257,14 +260,6 @@ function getDragModeCursor(dragMode: DragMode): string {
   return "pointer";
 }
 
-function isPointDrawing(drawing: Drawing): drawing is Trendline | Rectangle {
-  return "start" in drawing && "end" in drawing;
-}
-
-function isTextDrawing(drawing: Drawing): drawing is TextDrawing {
-  return "time" in drawing && "price" in drawing && "text" in drawing;
-}
-
 function applyTextFont(ctx: CanvasRenderingContext2D, dpr: number) {
   ctx.font = `${TEXT_FONT_SIZE * dpr}px sans-serif`;
   ctx.textBaseline = "middle";
@@ -309,7 +304,8 @@ export default function Chart({
   activeChart,
   setActiveChart,
   chartId,
-  seriesKey,
+  symbol,
+  timeframe,
   drawings,
   onAddTrendline,
   onAddRectangle,
@@ -996,7 +992,7 @@ export default function Chart({
     setDrawingStep("none");
     setSelectedDrawing(null);
     scheduleOverlayDraw();
-  }, [resetDragState, scheduleOverlayDraw, seriesKey]);
+  }, [resetDragState, scheduleOverlayDraw, symbol, timeframe]);
 
   useEffect(() => {
     if (activeChart && activeChart !== chartId && selectedDrawingRef.current) {
@@ -1476,6 +1472,7 @@ export default function Chart({
           }
 
           const text: TextDrawing = {
+            type: "text",
             id: createDrawingId("text"),
             time: point.time,
             price: point.price,
@@ -1484,7 +1481,7 @@ export default function Chart({
             width: 1,
             opacity: 1,
           };
-          onAddTextRef.current(chartId, text);
+          onAddTextRef.current(text);
           setSelectedDrawing({ type: "text", id: text.id });
           scheduleOverlayDraw();
           setTool("none");
@@ -1513,6 +1510,7 @@ export default function Chart({
           if (point.time === start.time) return;
 
           const line: Trendline = {
+            type: "trendline",
             id: createDrawingId("trendline"),
             start,
             end: point,
@@ -1521,10 +1519,11 @@ export default function Chart({
             width: 2,
             opacity: 1,
           };
-          onAddTrendlineRef.current(chartId, line);
+          onAddTrendlineRef.current(line);
           setSelectedDrawing({ type: "trendline", id: line.id });
         } else {
           const rect: Rectangle = {
+            type: "rectangle",
             id: createDrawingId("rectangle"),
             start,
             end: point,
@@ -1532,7 +1531,7 @@ export default function Chart({
             width: 2,
             opacity: 1,
           };
-          onAddRectangleRef.current(chartId, rect);
+          onAddRectangleRef.current(rect);
           setSelectedDrawing({ type: "rectangle", id: rect.id });
         }
 
@@ -1617,11 +1616,9 @@ export default function Chart({
 
     try {
       // Priority: use live data if available, otherwise fallback to historical from store
-      // seriesKey format: "nq" (symbol part before the timeframe)
-      const symbol = seriesKey;
-      const candlesFromStore = candleStoreData[symbol] ? Object.values(candleStoreData[symbol]).flat() : [];
-      let displayData: Candle[] = data.length > 0 
-        ? data 
+      const candlesFromStore = candleStoreData[symbol]?.[timeframe] ?? [];
+      let displayData: Candle[] = data.length > 0
+        ? data
         : candlesFromStore;
 
       // Apply replay slicing if in replay mode
@@ -1663,7 +1660,7 @@ export default function Chart({
     } catch (error) {
       console.error("[Chart] setData error:", error);
     }
-  }, [data, candleStoreData, seriesKey, isReplay, replayIndex, isReplaySync, activeChart, chartId, scheduleOverlayDraw]);
+  }, [data, candleStoreData, symbol, timeframe, isReplay, replayIndex, isReplaySync, activeChart, chartId, scheduleOverlayDraw]);
 
   useEffect(() => {
     scheduleOverlayDraw();

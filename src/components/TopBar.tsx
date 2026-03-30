@@ -1,6 +1,7 @@
 import { useThemeStore } from "../store/useThemeStore";
 import { useWorkspaceStore } from "../store/useWorkspaceStore";
 import { useLayoutState } from "../store/useLayoutState";
+import type { SessionKey } from "../types/sessions";
 import type { Workspace } from "../types/workspace";
 
 type Props = {
@@ -18,6 +19,12 @@ type Props = {
   setPlaySpeed?: (speed: 0.5 | 1 | 2 | 5) => void;
   isReplaySync?: boolean;
   setIsReplaySync?: (isReplaySync: boolean) => void;
+  jumpTime?: string;
+  setJumpTime?: (time: string) => void;
+  goToTime?: (targetTime: number) => void;
+  showSessions?: boolean;
+  setShowSessions?: (showSessions: boolean) => void;
+  jumpToSession?: (session: SessionKey) => void;
 };
 
 export default function TopBar({
@@ -35,6 +42,9 @@ export default function TopBar({
   setPlaySpeed,
   isReplaySync = false,
   setIsReplaySync,
+  jumpTime = "",
+  setJumpTime,
+  goToTime,
 }: Props) {
   const { mode, setMode, preset, setPreset } = useThemeStore();
   const { workspaces, activeWorkspaceId, setActiveWorkspace, saveWorkspace } = useWorkspaceStore();
@@ -195,6 +205,29 @@ export default function TopBar({
                 title={isReplaySync ? "All charts synced to replay" : "Chart sync OFF - only active chart replays"}
               >
                 {isReplaySync ? "🔗" : "🔓"}
+              </button>
+
+              {/* Jump to Time */}
+              <input
+                type="datetime-local"
+                value={jumpTime}
+                onChange={(e) => setJumpTime?.(e.target.value)}
+                className="ui-input"
+                style={{ height: "28px", fontSize: "11px", padding: "0 8px", width: "180px" }}
+                title="Jump to specific time"
+              />
+
+              <button
+                onClick={() => {
+                  if (!jumpTime) return;
+                  const ts = Math.floor(new Date(jumpTime).getTime() / 1000);
+                  goToTime?.(ts);
+                }}
+                className="ui-button"
+                style={{ height: "28px", padding: "0 12px", fontSize: "12px" }}
+                title="Jump to selected time"
+              >
+                GO
               </button>
 
               <span style={{ fontSize: "12px", color: "var(--panel-muted)", marginLeft: "4px" }}>

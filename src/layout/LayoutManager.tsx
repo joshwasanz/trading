@@ -8,6 +8,7 @@ import {
   EMPTY_CHART_DRAWINGS,
   type ChartDrawings,
   type Drawing,
+  type DrawingType,
   type DrawingSelection,
   type DrawingsState,
   type LineExtension,
@@ -16,6 +17,9 @@ import {
   type TextDrawing,
   type Trendline,
   createDrawingId,
+  isRectangleDrawing,
+  isTextDrawing,
+  isTrendlineDrawing,
 } from "../types/drawings";
 
 type Timeframe = "15s" | "1m" | "3m";
@@ -55,10 +59,33 @@ function normalizePoint(value: unknown): Point | null {
   };
 }
 
+function normalizeDrawingType<T extends DrawingType>(value: unknown, fallback: T): T {
+  return value === fallback ? fallback : fallback;
+}
+
+function normalizeBaseStyle(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const maybe = value as {
+    color?: unknown;
+    width?: unknown;
+    opacity?: unknown;
+  };
+
+  return {
+    color: typeof maybe.color === "string" ? maybe.color : undefined,
+    width: typeof maybe.width === "number" ? maybe.width : undefined,
+    opacity: typeof maybe.opacity === "number" ? maybe.opacity : undefined,
+  };
+}
+
 function normalizeTrendline(value: unknown): Trendline | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 
   const maybeLine = value as {
+    type?: unknown;
     id?: unknown;
     start?: unknown;
     end?: unknown;
@@ -76,25 +103,34 @@ function normalizeTrendline(value: unknown): Trendline | null {
       : DEFAULT_TRENDLINE_EXTENSION;
 
   return {
+    type: normalizeDrawingType(maybeLine.type, "trendline"),
     id: typeof maybeLine.id === "string" ? maybeLine.id : createDrawingId("trendline"),
     start,
     end,
     extend,
+    ...normalizeBaseStyle(value),
   };
 }
 
 function normalizeRectangle(value: unknown): Rectangle | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 
-  const maybeRect = value as { id?: unknown; start?: unknown; end?: unknown };
+  const maybeRect = value as {
+    type?: unknown;
+    id?: unknown;
+    start?: unknown;
+    end?: unknown;
+  };
   const start = normalizePoint(maybeRect.start);
   const end = normalizePoint(maybeRect.end);
   if (!start || !end) return null;
 
   return {
+    type: normalizeDrawingType(maybeRect.type, "rectangle"),
     id: typeof maybeRect.id === "string" ? maybeRect.id : createDrawingId("rectangle"),
     start,
     end,
+    ...normalizeBaseStyle(value),
   };
 }
 
@@ -102,6 +138,7 @@ function normalizeTextDrawing(value: unknown): TextDrawing | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 
   const maybeText = value as {
+    type?: unknown;
     id?: unknown;
     time?: unknown;
     price?: unknown;
@@ -112,10 +149,12 @@ function normalizeTextDrawing(value: unknown): TextDrawing | null {
   }
 
   return {
+    type: normalizeDrawingType(maybeText.type, "text"),
     id: typeof maybeText.id === "string" ? maybeText.id : createDrawingId("text"),
     time: maybeText.time as Point["time"],
     price: maybeText.price,
     text: typeof maybeText.text === "string" ? maybeText.text : "Text",
+    ...normalizeBaseStyle(value),
   };
 }
 
@@ -208,6 +247,7 @@ export default function LayoutManager({
   isReplay,
   replayIndex,
   isReplaySync,
+  showSessions,
 }: any) {
   const [vSplit, setVSplit] = useState(0.5);
   const [hSplit, setHSplit] = useState(0.5);
@@ -246,7 +286,7 @@ export default function LayoutManager({
 
     // Apply workspace state
     setPanels(workspace.panels);
-    setDrawingsBySymbol(workspace.drawingsBySymbol);
+    setDrawingsBySymbol(normalizeDrawingsState(workspace.drawingsBySymbol));
     setMode(workspace.theme.mode);
     setPreset(workspace.theme.preset);
     // layoutType is controlled by parent, so we don't modify it here
@@ -350,8 +390,8 @@ export default function LayoutManager({
         if (selection.type === "trendline") {
           return {
             trendlines: current.trendlines.map((line) =>
-              line.id === selection.id
-                ? (nextDrawing as Trendline)
+              line.id === selection.id && isTrendlineDrawing(nextDrawing)
+                ? nextDrawing
                 : line
             ),
             rectangles: current.rectangles,
@@ -363,8 +403,8 @@ export default function LayoutManager({
           return {
             trendlines: current.trendlines,
             rectangles: current.rectangles.map((rect) =>
-              rect.id === selection.id
-                ? (nextDrawing as Rectangle)
+              rect.id === selection.id && isRectangleDrawing(nextDrawing)
+                ? nextDrawing
                 : rect
             ),
             texts: current.texts,
@@ -375,8 +415,8 @@ export default function LayoutManager({
           trendlines: current.trendlines,
           rectangles: current.rectangles,
           texts: current.texts.map((text) =>
-            text.id === selection.id
-              ? (nextDrawing as TextDrawing)
+            text.id === selection.id && isTextDrawing(nextDrawing)
+              ? nextDrawing
               : text
           ),
         };
@@ -432,6 +472,7 @@ export default function LayoutManager({
       isReplay={isReplay}
       replayIndex={replayIndex}
       isReplaySync={isReplaySync}
+      showSessions={showSessions}
       {...sharedProps}
     />
   );

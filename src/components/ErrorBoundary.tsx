@@ -1,12 +1,12 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 
 type Props = { children: ReactNode };
-type State = { error: Error | null };
+type State = { error: Error | null; resetKey: number };
 
 export default class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null };
+  state: State = { error: null, resetKey: 0 };
 
-  static getDerivedStateFromError(error: Error): State {
+  static getDerivedStateFromError(error: Error): Pick<State, "error"> {
     return { error };
   }
 
@@ -53,7 +53,12 @@ export default class ErrorBoundary extends Component<Props, State> {
             {this.state.error.stack}
           </div>
           <button
-            onClick={() => this.setState({ error: null })}
+            onClick={() =>
+              this.setState((state) => ({
+                error: null,
+                resetKey: state.resetKey + 1,
+              }))
+            }
             style={{
               marginTop: "8px",
               padding: "8px 24px",
@@ -71,6 +76,6 @@ export default class ErrorBoundary extends Component<Props, State> {
       );
     }
 
-    return this.props.children;
+    return <div key={this.state.resetKey}>{this.props.children}</div>;
   }
 }

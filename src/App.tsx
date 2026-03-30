@@ -9,7 +9,9 @@ import { useToolStore } from "./store/useToolStore";
 import { useThemeStore } from "./store/useThemeStore";
 import { useWorkspaceStore } from "./store/useWorkspaceStore";
 import { useCandleStore } from "./store/useCandleStore";
+import { useLayoutState } from "./store/useLayoutState";
 import { EMPTY_CHART_DRAWINGS } from "./types/drawings";
+import { getSessionRange, type SessionKey } from "./types/sessions";
 
 type Candle = {
   symbol: string;
@@ -152,6 +154,29 @@ async function loadHistorical(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Binary search: find candle index by UNIX timestamp
+function findIndexByTime(data: Candle[], targetTime: number): number {
+  if (data.length === 0) return 0;
+  if (targetTime <= data[0].time) return 0;
+  if (targetTime >= data[data.length - 1].time) return data.length - 1;
+
+  let left = 0;
+  let right = data.length - 1;
+
+  while (left <= right) {
+    const mid = Math.floor((left + right) / 2);
+    const time = data[mid].time;
+
+    if (time === targetTime) return mid;
+    if (time < targetTime) left = mid + 1;
+    else right = mid - 1;
+  }
+
+  return left; // nearest future candle
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function AppInner() {
   const [data, setData] = useState(() => readStoredData());
   const dataRef = useRef(data);
@@ -166,12 +191,15 @@ function AppInner() {
   const [playSpeed, setPlaySpeed] = useState<0.5 | 1 | 2 | 5>(1);
   const [isReplaySync, setIsReplaySync] = useState(false);
   const [activeChartReplayIndex, setActiveChartReplayIndex] = useState(0);
+  const [jumpTime, setJumpTime] = useState("");
+  const [showSessions, setShowSessions] = useState(false);
 
   const tool = useToolStore((state) => state.tool);
   const magnet = useToolStore((state) => state.magnet);
   const { theme } = useThemeStore();
   const { workspaces, setActiveWorkspace, createDefaultWorkspace } = useWorkspaceStore();
   const { setData: setCandleData } = useCandleStore();
+  const panels = useLayoutState((state) => state.panels);
 
   // Helper: get maximum data length across all symbol/timeframe combos
   const getMaxDataLength = () => {
@@ -201,6 +229,30 @@ function AppInner() {
   const resetReplay = () => {
     const maxLength = getMaxDataLength();
     setReplayIndex(Math.min(100, Math.max(0, maxLength - 1)));
+  };
+
+  // Jump to specific time: find candle by UNIX timestamp and move replay index
+  const goToTime = (targetTime: number) => {
+    if (!activeChart) return;
+
+    const activePanel = panels.find((panel) => panel.id === activeChart);
+    if (!activePanel) return;
+
+    const { symbol, timeframe: tf } = activePanel;
+
+    const series = data[symbol]?.[tf];
+    if (!series || series.length === 0) return;
+
+    const index = findIndexByTime(series, targetTime);
+    setReplayIndex(index);
+    console.log(`[Jump to Time] Moved to index ${index} (timestamp ${targetTime})`);
+  };
+
+  // Jump to session start time (e.g., "london", "newyork")
+  const jumpToSession = (session: SessionKey) => {
+    const now = new Date();
+    const { start } = getSessionRange(now, session);
+    goToTime(start);
   };
 
   // When entering replay mode, jump to last candle (pause at current market state)
@@ -432,6 +484,12 @@ function AppInner() {
           setPlaySpeed={setPlaySpeed}
           isReplaySync={isReplaySync}
           setIsReplaySync={setIsReplaySync}
+          jumpTime={jumpTime}
+          setJumpTime={setJumpTime}
+          goToTime={goToTime}
+          showSessions={showSessions}
+          setShowSessions={setShowSessions}
+          jumpToSession={jumpToSession}
         />
       </div>
 
@@ -449,6 +507,7 @@ function AppInner() {
             isReplay={isReplay}
             replayIndex={replayIndex}
             isReplaySync={isReplaySync}
+            showSessions={showSessions}
           />
         </div>
       </div>

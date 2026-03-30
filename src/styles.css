@@ -356,6 +356,47 @@ html, body, #root {
   }
 }
 
+/* 🎨 INPUT FIELD SYSTEM */
+.ui-input {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--panel-text);
+  font-size: 11px;
+  outline: none;
+  transition: all 0.18s ease;
+}
+
+.ui-input:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.ui-input:focus {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--panel-accent);
+}
+
+/* Light mode input overrides */
+@media (prefers-color-scheme: light) {
+  .ui-input {
+    background: rgba(0, 0, 0, 0.02);
+    border-color: rgba(0, 0, 0, 0.08);
+  }
+  
+  .ui-input:hover {
+    background: rgba(0, 0, 0, 0.04);
+    border-color: rgba(0, 0, 0, 0.12);
+  }
+  
+  .ui-input:focus {
+    background: rgba(0, 0, 0, 0.05);
+    border-color: var(--panel-accent);
+  }
+}
+
 /* 🔥 DRAWING ANIMATIONS */
 @keyframes pop {
   0% {

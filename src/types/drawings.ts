@@ -15,6 +15,7 @@ export type BaseStyle = {
 };
 
 export type Trendline = {
+  type: "trendline";
   id: string;
   start: Point;
   end: Point;
@@ -22,12 +23,14 @@ export type Trendline = {
 } & BaseStyle;
 
 export type Rectangle = {
+  type: "rectangle";
   id: string;
   start: Point;
   end: Point;
 } & BaseStyle;
 
 export type TextDrawing = {
+  type: "text";
   id: string;
   time: UTCTimestamp;
   price: number;
@@ -63,4 +66,20 @@ export function createDrawingId(type: DrawingType): string {
   }
 
   return `${type}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export function isTrendlineDrawing(drawing: Drawing): drawing is Trendline {
+  return drawing.type === "trendline";
+}
+
+export function isRectangleDrawing(drawing: Drawing): drawing is Rectangle {
+  return drawing.type === "rectangle";
+}
+
+export function isTextDrawing(drawing: Drawing): drawing is TextDrawing {
+  return drawing.type === "text";
+}
+
+export function isPointDrawing(drawing: Drawing): drawing is Trendline | Rectangle {
+  return isTrendlineDrawing(drawing) || isRectangleDrawing(drawing);
 }
