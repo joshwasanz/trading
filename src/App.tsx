@@ -10,12 +10,18 @@ import { useCandleStore } from "./store/useCandleStore";
 import { useLayoutState } from "./store/useLayoutState";
 import { EMPTY_CHART_DRAWINGS } from "./types/drawings";
 import { marketDataProvider } from "./data/providers";
-import type { Candle, SupportedSymbol, Timeframe } from "./types/marketData";
+import type { Candle, HistoricalRequest, SupportedSymbol, Timeframe } from "./types/marketData";
 import type { ReplayStartPayload } from "./types/replay";
 import { getSessionRange, type SessionKey } from "./types/sessions";
+import {
+  clearLegacyMarketDataCaches,
+  sanitizeCachedCandleData,
+  sanitizeCandleSeries,
+} from "./utils/candleCache";
 import { findCandleIndexAtOrBefore } from "./utils/replay";
 
-const DATA_STORAGE_KEY = "chart-data-v1";
+const DATA_STORAGE_KEY = "chart-data-v2";
+const LEGACY_DATA_STORAGE_KEYS = ["chart-data-v1"];
 const SUPPORTED_TIMEFRAMES: Timeframe[] = ["15s", "1m", "3m"];
 
 type Panel = {
@@ -50,27 +56,23 @@ function readStoredData(): Record<string, Record<Timeframe, Candle[]>> {
   if (typeof window === "undefined") return initialDataState;
 
   try {
+    clearLegacyMarketDataCaches(window.localStorage, LEGACY_DATA_STORAGE_KEYS);
     const stored = window.localStorage.getItem(DATA_STORAGE_KEY);
     if (!stored) return initialDataState;
 
-    const parsed: unknown = JSON.parse(stored);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return initialDataState;
-    }
-
+    const parsed = sanitizeCachedCandleData(JSON.parse(stored));
     const merged: Record<string, Record<Timeframe, Candle[]>> = {
       nq: createEmptyTimeframeData(),
       es: createEmptyTimeframeData(),
     };
 
-    for (const [symbol, maybeSeries] of Object.entries(parsed as Record<string, unknown>)) {
-      const series = maybeSeries as Partial<Record<Timeframe, Candle[]>>;
+    for (const [symbol, series] of Object.entries(parsed)) {
       const current = merged[symbol] ?? createEmptyTimeframeData();
 
       merged[symbol] = {
-        "15s": Array.isArray(series["15s"]) ? series["15s"] : current["15s"],
-        "1m": Array.isArray(series["1m"]) ? series["1m"] : current["1m"],
-        "3m": Array.isArray(series["3m"]) ? series["3m"] : current["3m"],
+        "15s": sanitizeCandleSeries(symbol, "15s", series["15s"] ?? current["15s"]),
+        "1m": sanitizeCandleSeries(symbol, "1m", series["1m"] ?? current["1m"]),
+        "3m": sanitizeCandleSeries(symbol, "3m", series["3m"] ?? current["3m"]),
       };
     }
 
@@ -118,6 +120,118 @@ function mergeHistoricalSeries(existing: Candle[], historical: Candle[]): Candle
   }
 
   return merged;
+}
+
+type LoadedRange = {
+  oldest: number | null;
+  newest: number | null;
+};
+
+type LoadedRangesState = Record<string, Record<Timeframe, LoadedRange>>;
+
+function createEmptyLoadedRange(): LoadedRange {
+  return {
+    oldest: null,
+    newest: null,
+  };
+}
+
+function createEmptyLoadedRangeMap(): Record<Timeframe, LoadedRange> {
+  return {
+    "15s": createEmptyLoadedRange(),
+    "1m": createEmptyLoadedRange(),
+    "3m": createEmptyLoadedRange(),
+  };
+}
+
+function createLoadedRangesState(symbolIds: string[]): LoadedRangesState {
+  return Object.fromEntries(
+    symbolIds.map((symbolId) => [symbolId, createEmptyLoadedRangeMap()])
+  ) as LoadedRangesState;
+}
+
+function timeframeSeconds(timeframe: Timeframe): number {
+  switch (timeframe) {
+    case "15s":
+      return 15;
+    case "1m":
+      return 60;
+    case "3m":
+      return 180;
+    default:
+      return 60;
+  }
+}
+
+function buildInitialHistoricalRequest(symbol: string, timeframe: Timeframe) {
+  const step = timeframeSeconds(timeframe);
+  const limit = timeframe === "15s" ? 600 : timeframe === "1m" ? 500 : 400;
+  const now = Math.floor(Date.now() / 1000);
+  const to = now - (now % step);
+  const from = to - (limit - 1) * step;
+
+  return {
+    symbol,
+    timeframe,
+    from,
+    to,
+    limit,
+  };
+}
+
+function getLoadedRangeFromCandles(candles: Candle[]): LoadedRange {
+  if (candles.length === 0) {
+    return createEmptyLoadedRange();
+  }
+
+  return {
+    oldest: candles[0]?.time ?? null,
+    newest: candles[candles.length - 1]?.time ?? null,
+  };
+}
+
+function makeRangeRequestKey(
+  symbol: string,
+  timeframe: Timeframe,
+  from: number | null | undefined,
+  to: number | null | undefined,
+  limit: number | null | undefined
+) {
+  return `${symbol}:${timeframe}:${from ?? "null"}:${to ?? "null"}:${limit ?? "null"}`;
+}
+
+function isRangeCovered(
+  loaded: LoadedRange | null | undefined,
+  from: number | null | undefined,
+  to: number | null | undefined
+) {
+  if (!loaded || loaded.oldest === null || loaded.newest === null) {
+    return false;
+  }
+
+  if (from != null && from < loaded.oldest) {
+    return false;
+  }
+
+  if (to != null && to > loaded.newest) {
+    return false;
+  }
+
+  return true;
+}
+
+function mergeCandlesPreservingOrder(existing: Candle[], incoming: Candle[]) {
+  const byTime = new Map<number, Candle>();
+
+  for (const candle of existing) {
+    byTime.set(candle.time, candle);
+  }
+
+  for (const candle of incoming) {
+    byTime.set(candle.time, candle);
+  }
+
+  return Array.from(byTime.values()).sort((left, right) => left.time - right.time);
 }
 
 // ─── Historical Loader ────────────────────────────────────────────────────────
@@ -184,6 +298,11 @@ void findIndexByTime;
 function AppInner() {
   const [data, setData] = useState(() => readStoredData());
   const dataRef = useRef(data);
+  const [loadedRanges, setLoadedRanges] = useState<LoadedRangesState>(() =>
+    createLoadedRangesState(DEFAULT_SUPPORTED_SYMBOLS.map(({ id }) => id))
+  );
+  const loadedRangesRef = useRef(loadedRanges);
+  const inFlightHistoricalRequestsRef = useRef<Map<string, Promise<Candle[]>>>(new Map());
   const undoHistoryRef = useRef<(() => void) | null>(null);
   const redoHistoryRef = useRef<(() => void) | null>(null);
 
@@ -223,10 +342,10 @@ function AppInner() {
 
       return {
         panel,
-        candles: data[panel.symbol]?.[panel.timeframe] ?? [],
+        candles: dataRef.current[panel.symbol]?.[panel.timeframe] ?? [],
       };
     },
-    [data, panels]
+    [panels]
   );
 
   const resolveReplayPosition = useCallback(
@@ -268,6 +387,112 @@ function AppInner() {
   const redoDrawings = useCallback(() => {
     redoHistoryRef.current?.();
   }, []);
+
+  const fetchHistoricalDeduped = useCallback(
+    async (
+      request: HistoricalRequest & {
+        force?: boolean;
+      }
+    ): Promise<Candle[]> => {
+      const { symbol, timeframe, from, to, limit, force = false } = request;
+      const loaded = loadedRangesRef.current[symbol]?.[timeframe] ?? createEmptyLoadedRange();
+
+      if (!force && isRangeCovered(loaded, from, to)) {
+        return [];
+      }
+
+      const key = makeRangeRequestKey(symbol, timeframe, from, to, limit);
+      const existing = inFlightHistoricalRequestsRef.current.get(key);
+      if (existing) {
+        return existing;
+      }
+
+      const promise = marketDataProvider
+        .getHistorical({ symbol, timeframe, from, to, limit })
+        .finally(() => {
+          inFlightHistoricalRequestsRef.current.delete(key);
+        });
+
+      inFlightHistoricalRequestsRef.current.set(key, promise);
+      return promise;
+    },
+    []
+  );
+
+  const applyHistoricalCandles = useCallback(
+    (symbol: string, timeframe: Timeframe, candles: Candle[]) => {
+      if (candles.length === 0) {
+        return;
+      }
+
+      const currentSymbolData = dataRef.current[symbol] ?? createEmptyTimeframeData();
+      const merged = mergeCandlesPreservingOrder(currentSymbolData[timeframe] ?? [], candles);
+      const nextState = {
+        ...dataRef.current,
+        [symbol]: {
+          ...currentSymbolData,
+          [timeframe]: merged,
+        },
+      };
+      const mergedRange = getLoadedRangeFromCandles(merged);
+
+      dataRef.current = nextState;
+      setData(nextState);
+      setCandleData(symbol, timeframe, merged);
+      setLoadedRanges((prev) => {
+        const currentSymbolRanges = prev[symbol] ?? createEmptyLoadedRangeMap();
+        const nextRanges = {
+          ...prev,
+          [symbol]: {
+            ...currentSymbolRanges,
+            [timeframe]: mergedRange,
+          },
+        };
+
+        loadedRangesRef.current = nextRanges;
+        return nextRanges;
+      });
+    },
+    [setCandleData]
+  );
+
+  const loadOlderHistory = useCallback(
+    async (symbol: string, timeframe: Timeframe, currentOldest: number | null) => {
+      if (currentOldest === null) {
+        return [];
+      }
+
+      const step = timeframeSeconds(timeframe);
+      const limit = timeframe === "15s" ? 600 : timeframe === "1m" ? 500 : 400;
+      const to = currentOldest - step;
+
+      if (to <= 0) {
+        return [];
+      }
+
+      const from = to - (limit - 1) * step;
+
+      try {
+        const candles = await fetchHistoricalDeduped({
+          symbol,
+          timeframe,
+          from,
+          to,
+          limit,
+        });
+
+        if (candles.length > 0) {
+          applyHistoricalCandles(symbol, timeframe, candles);
+        }
+
+        return candles;
+      } catch (error) {
+        console.error(`[App] Failed to backfill ${symbol}/${timeframe}:`, error);
+        return [];
+      }
+    },
+    [applyHistoricalCandles, fetchHistoricalDeduped]
+  );
 
   const moveReplayCursor = useCallback(
     (direction: -1 | 1) => {
@@ -381,24 +606,55 @@ function AppInner() {
     [resolveReplayPosition]
   );
 
-  // Jump to specific time: find candle by UNIX timestamp and move replay index
-  const goToTime = (targetTime: number) => {
-    if (!activeChart) return;
+  // Jump to specific time: fetch older history first when the requested time is outside the loaded window.
+  const goToTime = useCallback(
+    (targetTime: number) => {
+      if (!activeChart) return;
 
-    const resolved = resolveReplayPosition(activeChart, targetTime);
-    if (!resolved) return;
+      void (async () => {
+        const panelState = getReplayPanelState(activeChart);
+        if (!panelState) return;
 
-    setIsReplay(true);
-    setIsReplaySelectingStart(false);
-    setReplaySelectionPanelId(null);
-    setIsPlaying(false);
-    setReplayIndex(resolved.index);
-    setReplayCursorTime(resolved.timestamp);
-    setReplayStartTime((current) => current ?? resolved.timestamp);
-    console.log(
-      `[Jump to Time] Moved to index ${resolved.index} (timestamp ${resolved.timestamp})`
-    );
-  };
+        let oldestLoaded =
+          loadedRangesRef.current[panelState.panel.symbol]?.[panelState.panel.timeframe]?.oldest ??
+          panelState.candles[0]?.time ??
+          null;
+        let attempts = 0;
+
+        while (oldestLoaded !== null && targetTime < oldestLoaded && attempts < 5) {
+          const olderCandles = await loadOlderHistory(
+            panelState.panel.symbol,
+            panelState.panel.timeframe,
+            oldestLoaded
+          );
+
+          if (olderCandles.length === 0) {
+            break;
+          }
+
+          oldestLoaded =
+            loadedRangesRef.current[panelState.panel.symbol]?.[panelState.panel.timeframe]
+              ?.oldest ?? oldestLoaded;
+          attempts += 1;
+        }
+
+        const resolved = resolveReplayPosition(activeChart, targetTime);
+        if (!resolved) return;
+
+        setIsReplay(true);
+        setIsReplaySelectingStart(false);
+        setReplaySelectionPanelId(null);
+        setIsPlaying(false);
+        setReplayIndex(resolved.index);
+        setReplayCursorTime(resolved.timestamp);
+        setReplayStartTime((current) => current ?? resolved.timestamp);
+        console.log(
+          `[Jump to Time] Moved to index ${resolved.index} (timestamp ${resolved.timestamp})`
+        );
+      })();
+    },
+    [activeChart, getReplayPanelState, loadOlderHistory, resolveReplayPosition]
+  );
 
   // Jump to session start time (e.g., "london", "newyork")
   const jumpToSession = (session: SessionKey) => {
@@ -446,6 +702,30 @@ function AppInner() {
   useEffect(() => {
     dataRef.current = data;
   }, [data]);
+
+  useEffect(() => {
+    loadedRangesRef.current = loadedRanges;
+  }, [loadedRanges]);
+
+  useEffect(() => {
+    setLoadedRanges((prev) => {
+      let changed = false;
+      const nextRanges = { ...prev };
+
+      for (const { id } of supportedSymbols) {
+        if (nextRanges[id]) continue;
+        nextRanges[id] = createEmptyLoadedRangeMap();
+        changed = true;
+      }
+
+      if (!changed) {
+        return prev;
+      }
+
+      loadedRangesRef.current = nextRanges;
+      return nextRanges;
+    });
+  }, [supportedSymbols]);
 
   // Initialize default workspace if none exist
   useEffect(() => {
@@ -529,60 +809,25 @@ function AppInner() {
     let cancelled = false;
 
     async function loadHistoricalData() {
-      const historicalEntries: Array<{
-        symbol: string;
-        timeframe: Timeframe;
-        candles: Candle[];
-      }> = [];
-
       for (const { id: symbol } of supportedSymbols) {
         for (const timeframe of SUPPORTED_TIMEFRAMES) {
           try {
-            const candles = await marketDataProvider.getHistorical({
-              symbol,
-              timeframe,
-            });
+            const candles = await fetchHistoricalDeduped(
+              buildInitialHistoricalRequest(symbol, timeframe)
+            );
 
             if (cancelled) {
               return;
             }
 
-            historicalEntries.push({ symbol, timeframe, candles });
-            setCandleData(symbol, timeframe, candles);
+            if (candles.length > 0) {
+              applyHistoricalCandles(symbol, timeframe, candles);
+            }
           } catch (error) {
             console.error(`[App] Failed to load ${symbol}/${timeframe}:`, error);
           }
         }
       }
-
-      if (cancelled || historicalEntries.length === 0) {
-        return;
-      }
-
-      setData((prev) => {
-        let nextState = prev;
-
-        for (const entry of historicalEntries) {
-          if (entry.candles.length === 0) continue;
-
-          const currentSymbolData = nextState[entry.symbol] ?? createEmptyTimeframeData();
-          const merged = mergeHistoricalSeries(
-            currentSymbolData[entry.timeframe] ?? [],
-            entry.candles
-          );
-
-          nextState = {
-            ...nextState,
-            [entry.symbol]: {
-              ...currentSymbolData,
-              [entry.timeframe]: merged,
-            },
-          };
-        }
-
-        dataRef.current = nextState;
-        return nextState;
-      });
     }
 
     void loadHistoricalData();
@@ -590,7 +835,7 @@ function AppInner() {
     return () => {
       cancelled = true;
     };
-  }, [setCandleData, supportedSymbols]);
+  }, [applyHistoricalCandles, fetchHistoricalDeduped, supportedSymbols]);
 
   useEffect(() => {
     let cancelled = false;

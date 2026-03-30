@@ -1,5 +1,9 @@
 import { create } from "zustand";
 import type { Candle, Timeframe } from "../types/marketData";
+import {
+  clearLegacyMarketDataCaches,
+  sanitizeCachedCandleData,
+} from "../utils/candleCache";
 
 type CandleData = Record<string, Partial<Record<Timeframe, Candle[]>>>;
 
@@ -9,15 +13,17 @@ type State = {
   loadFromCache: () => void;
 };
 
-const STORAGE_KEY = "candle_cache_v1";
+const STORAGE_KEY = "candle_cache_v2";
+const LEGACY_STORAGE_KEYS = ["candle_cache_v1"];
 
 function loadFromLocalStorage(): CandleData {
   if (typeof window === "undefined") return {};
 
   try {
+    clearLegacyMarketDataCaches(window.localStorage, LEGACY_STORAGE_KEYS);
     const cached = window.localStorage.getItem(STORAGE_KEY);
     if (cached) {
-      return JSON.parse(cached);
+      return sanitizeCachedCandleData(JSON.parse(cached));
     }
   } catch (error) {
     console.error("[CandleStore] Failed to load cache:", error);
