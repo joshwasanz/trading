@@ -207,6 +207,7 @@ export default function LayoutManager({
   magnet,
   isReplay,
   replayIndex,
+  isReplaySync,
 }: any) {
   const [vSplit, setVSplit] = useState(0.5);
   const [hSplit, setHSplit] = useState(0.5);
@@ -430,6 +431,7 @@ export default function LayoutManager({
       onTimeframeChange={(timeframe) => updatePanel(panel.id, { timeframe })}
       isReplay={isReplay}
       replayIndex={replayIndex}
+      isReplaySync={isReplaySync}
       {...sharedProps}
     />
   );

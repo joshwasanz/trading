@@ -162,6 +162,10 @@ function AppInner() {
   // Replay engine state
   const [isReplay, setIsReplay] = useState(false);
   const [replayIndex, setReplayIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playSpeed, setPlaySpeed] = useState<0.5 | 1 | 2 | 5>(1);
+  const [isReplaySync, setIsReplaySync] = useState(false);
+  const [activeChartReplayIndex, setActiveChartReplayIndex] = useState(0);
 
   const tool = useToolStore((state) => state.tool);
   const magnet = useToolStore((state) => state.magnet);
@@ -206,6 +210,53 @@ function AppInner() {
       setReplayIndex(Math.max(0, maxLength - 1)); // freeze at last available candle
     }
   }, [isReplay]);
+
+  // Autoplay: step forward at intervals based on playSpeed
+  useEffect(() => {
+    if (!isPlaying || !isReplay) return;
+
+    // Calculate interval based on speed (in ms per candle)
+    const speedIntervals: Record<0.5 | 1 | 2 | 5, number> = {
+      0.5: 600, // slow
+      1: 300,   // normal
+      2: 150,   // fast
+      5: 60,    // very fast
+    };
+
+    const interval = setInterval(() => {
+      setReplayIndex((i) => {
+        const maxLength = getMaxDataLength();
+        const nextIndex = i + 1;
+        // Auto-stop when reaching end
+        if (nextIndex >= maxLength - 1) {
+          setIsPlaying(false);
+          return Math.max(0, maxLength - 1);
+        }
+        return nextIndex;
+      });
+    }, speedIntervals[playSpeed]);
+
+    return () => clearInterval(interval);
+  }, [isPlaying, isReplay, playSpeed]);
+
+  // Track active chart's position when in independent (sync OFF) mode
+  useEffect(() => {
+    if (!isReplaySync && isReplay && activeChart) {
+      // Capture active chart's current replay position
+      setActiveChartReplayIndex(replayIndex);
+    }
+  }, [replayIndex, isReplay, isReplaySync, activeChart]);
+
+  // SYNC TOGGLE ALIGNMENT: Align all charts to active chart's position when sync toggles ON
+  useEffect(() => {
+    if (isReplaySync && isReplay && activeChart) {
+      // When enabling sync, snap all charts to active chart's current position
+      // Use explicit fallback: activeChartReplayIndex > global replayIndex > 0
+      const targetIndex = activeChartReplayIndex || replayIndex || 0;
+      setReplayIndex(targetIndex);
+      console.log(`[Replay Sync] Aligned all charts to ${activeChart} at index ${targetIndex}`);
+    }
+  }, [isReplaySync, activeChart, isReplay, activeChartReplayIndex, replayIndex]);
 
   // Keep dataRef in sync with state (including historical loads)
   useEffect(() => {
@@ -375,6 +426,12 @@ function AppInner() {
           stepForward={stepForward}
           stepBackward={stepBackward}
           resetReplay={resetReplay}
+          isPlaying={isPlaying}
+          setIsPlaying={setIsPlaying}
+          playSpeed={playSpeed}
+          setPlaySpeed={setPlaySpeed}
+          isReplaySync={isReplaySync}
+          setIsReplaySync={setIsReplaySync}
         />
       </div>
 
@@ -391,6 +448,7 @@ function AppInner() {
             magnet={magnet}
             isReplay={isReplay}
             replayIndex={replayIndex}
+            isReplaySync={isReplaySync}
           />
         </div>
       </div>

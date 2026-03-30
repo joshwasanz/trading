@@ -38,6 +38,7 @@ type Props = {
   onClearDrawings?: () => void;
   isReplay?: boolean;
   replayIndex?: number;
+  isReplaySync?: boolean;
 };
 
 export default function ChartPanel({
@@ -64,6 +65,7 @@ export default function ChartPanel({
   onClearDrawings,
   isReplay,
   replayIndex,
+  isReplaySync,
 }: Props) {
   const chartId = panelId;
   const hasDrawings =
@@ -180,6 +182,7 @@ export default function ChartPanel({
           hidden={drawingsHidden}
           isReplay={isReplay}
           replayIndex={replayIndex}
+          isReplaySync={isReplaySync}
         />
       </div>
     </div>

@@ -51,6 +51,7 @@ type Props = {
   hidden?: boolean;
   isReplay?: boolean;
   replayIndex?: number;
+  isReplaySync?: boolean;
 };
 
 type ScreenPoint = {
@@ -320,6 +321,7 @@ export default function Chart({
   hidden = false,
   isReplay = false,
   replayIndex = 0,
+  isReplaySync = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -1607,6 +1609,12 @@ export default function Chart({
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
 
+    // LIVE DATA LEAK FIX: Prevent inactive charts from updating during independent replay
+    // When sync is OFF and this chart is not active, keep it stable (don't flicker with live updates)
+    if (isReplay && !isReplaySync && activeChart !== chartId) {
+      return;
+    }
+
     try {
       // Priority: use live data if available, otherwise fallback to historical from store
       // seriesKey format: "nq" (symbol part before the timeframe)
@@ -1618,7 +1626,10 @@ export default function Chart({
 
       // Apply replay slicing if in replay mode
       // Safety: bound replayIndex to actual data length to prevent blank charts on symbol/timeframe switches
-      if (isReplay && replayIndex > 0) {
+      // If sync is OFF, only apply replay to the active chart; otherwise all charts show replay data
+      const shouldApplyReplay = isReplay && replayIndex > 0 && (isReplaySync || activeChart === chartId);
+      
+      if (shouldApplyReplay) {
         const safeIndex = Math.min(replayIndex, displayData.length);
         displayData = displayData.slice(0, safeIndex);
       }
@@ -1652,7 +1663,7 @@ export default function Chart({
     } catch (error) {
       console.error("[Chart] setData error:", error);
     }
-  }, [data, candleStoreData, seriesKey, isReplay, replayIndex, scheduleOverlayDraw]);
+  }, [data, candleStoreData, seriesKey, isReplay, replayIndex, isReplaySync, activeChart, chartId, scheduleOverlayDraw]);
 
   useEffect(() => {
     scheduleOverlayDraw();

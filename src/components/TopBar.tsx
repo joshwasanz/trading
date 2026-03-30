@@ -12,6 +12,12 @@ type Props = {
   stepForward?: () => void;
   stepBackward?: () => void;
   resetReplay?: () => void;
+  isPlaying?: boolean;
+  setIsPlaying?: (isPlaying: boolean) => void;
+  playSpeed?: 0.5 | 1 | 2 | 5;
+  setPlaySpeed?: (speed: 0.5 | 1 | 2 | 5) => void;
+  isReplaySync?: boolean;
+  setIsReplaySync?: (isReplaySync: boolean) => void;
 };
 
 export default function TopBar({
@@ -23,6 +29,12 @@ export default function TopBar({
   stepForward,
   stepBackward,
   resetReplay,
+  isPlaying = false,
+  setIsPlaying,
+  playSpeed = 1,
+  setPlaySpeed,
+  isReplaySync = false,
+  setIsReplaySync,
 }: Props) {
   const { mode, setMode, preset, setPreset } = useThemeStore();
   const { workspaces, activeWorkspaceId, setActiveWorkspace, saveWorkspace } = useWorkspaceStore();
@@ -147,6 +159,42 @@ export default function TopBar({
                 title="Reset to start"
               >
                 Reset
+              </button>
+
+              {/* Play / Pause */}
+              <button
+                onClick={() => setIsPlaying?.(!isPlaying)}
+                className={`ui-button ${isPlaying ? "ui-button--active" : ""}`}
+                style={{ height: "28px", padding: "0 10px", fontSize: "14px" }}
+                title={isPlaying ? "Pause autoplay" : "Start autoplay"}
+              >
+                {isPlaying ? "⏸" : "▶️"}
+              </button>
+
+              {/* Speed Control */}
+              {isPlaying && (
+                <select
+                  value={playSpeed}
+                  onChange={(e) => setPlaySpeed?.(parseFloat(e.target.value) as 0.5 | 1 | 2 | 5)}
+                  className="ui-dropdown"
+                  style={{ height: "28px", fontSize: "12px" }}
+                  title="Playback speed"
+                >
+                  <option value={0.5}>0.5x</option>
+                  <option value={1}>1x</option>
+                  <option value={2}>2x</option>
+                  <option value={5}>5x</option>
+                </select>
+              )}
+
+              {/* Multi-Chart Sync Toggle */}
+              <button
+                onClick={() => setIsReplaySync?.(!isReplaySync)}
+                className={`ui-button ${isReplaySync ? "ui-button--active" : ""}`}
+                style={{ height: "28px", padding: "0 10px", fontSize: "14px" }}
+                title={isReplaySync ? "All charts synced to replay" : "Chart sync OFF - only active chart replays"}
+              >
+                {isReplaySync ? "🔗" : "🔓"}
               </button>
 
               <span style={{ fontSize: "12px", color: "var(--panel-muted)", marginLeft: "4px" }}>
