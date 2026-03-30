@@ -36,6 +36,8 @@ type Props = {
   onHideDrawings?: () => void;
   onShowDrawings?: () => void;
   onClearDrawings?: () => void;
+  isReplay?: boolean;
+  replayIndex?: number;
 };
 
 export default function ChartPanel({
@@ -60,6 +62,8 @@ export default function ChartPanel({
   onHideDrawings,
   onShowDrawings,
   onClearDrawings,
+  isReplay,
+  replayIndex,
 }: Props) {
   const chartId = panelId;
   const hasDrawings =
@@ -174,6 +178,8 @@ export default function ChartPanel({
           tool={tool}
           magnet={magnet}
           hidden={drawingsHidden}
+          isReplay={isReplay}
+          replayIndex={replayIndex}
         />
       </div>
     </div>

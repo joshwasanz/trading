@@ -6,11 +6,23 @@ import type { Workspace } from "../types/workspace";
 type Props = {
   layoutType: string;
   setLayoutType: (layoutType: string) => void;
+  isReplay?: boolean;
+  setIsReplay?: (isReplay: boolean) => void;
+  replayIndex?: number;
+  stepForward?: () => void;
+  stepBackward?: () => void;
+  resetReplay?: () => void;
 };
 
 export default function TopBar({
   layoutType,
   setLayoutType,
+  isReplay = false,
+  setIsReplay,
+  replayIndex = 0,
+  stepForward,
+  stepBackward,
+  resetReplay,
 }: Props) {
   const { mode, setMode, preset, setPreset } = useThemeStore();
   const { workspaces, activeWorkspaceId, setActiveWorkspace, saveWorkspace } = useWorkspaceStore();
@@ -95,6 +107,55 @@ export default function TopBar({
           </button>
         )}
       </div>
+
+      {/* ================= REPLAY ENGINE ================= */}
+      {isReplay !== undefined && (
+        <div style={{ display: "flex", gap: "4px", alignItems: "center", marginLeft: "12px" }}>
+          <button
+            onClick={() => setIsReplay?.(!isReplay)}
+            className={`ui-button ${isReplay ? "ui-button--active" : ""}`}
+            style={{ height: "28px", padding: "0 12px", fontSize: "12px" }}
+            title={isReplay ? "Exit Replay Mode" : "Enter Replay Mode"}
+          >
+            {isReplay ? "Stop" : "Replay"}
+          </button>
+
+          {isReplay && (
+            <>
+              <button
+                onClick={() => stepBackward?.()}
+                className="ui-button"
+                style={{ height: "28px", padding: "0 8px", fontSize: "14px" }}
+                title="Previous candle"
+              >
+                ◀
+              </button>
+
+              <button
+                onClick={() => stepForward?.()}
+                className="ui-button"
+                style={{ height: "28px", padding: "0 8px", fontSize: "14px" }}
+                title="Next candle"
+              >
+                ▶
+              </button>
+
+              <button
+                onClick={() => resetReplay?.()}
+                className="ui-button"
+                style={{ height: "28px", padding: "0 12px", fontSize: "12px" }}
+                title="Reset to start"
+              >
+                Reset
+              </button>
+
+              <span style={{ fontSize: "12px", color: "var(--panel-muted)", marginLeft: "4px" }}>
+                Index: {replayIndex}
+              </span>
+            </>
+          )}
+        </div>
+      )}
 
       {/* ================= THEME & PRESET ================= */}
       <div style={{ marginLeft: "auto", display: "flex", gap: "4px", alignItems: "center" }}>

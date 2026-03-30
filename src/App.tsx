@@ -158,11 +158,54 @@ function AppInner() {
 
   const [activeChart, setActiveChart] = useState<string | null>(null);
   const [layoutType, setLayoutType] = useState("2");
+  
+  // Replay engine state
+  const [isReplay, setIsReplay] = useState(false);
+  const [replayIndex, setReplayIndex] = useState(0);
 
   const tool = useToolStore((state) => state.tool);
   const magnet = useToolStore((state) => state.magnet);
   const { theme } = useThemeStore();
   const { workspaces, setActiveWorkspace, createDefaultWorkspace } = useWorkspaceStore();
+  const { setData: setCandleData } = useCandleStore();
+
+  // Helper: get maximum data length across all symbol/timeframe combos
+  const getMaxDataLength = () => {
+    let max = 0;
+    const symbols = ["nq", "es"];
+    const timeframes = ["15s", "1m", "3m"] as const;
+    
+    for (const symbol of symbols) {
+      for (const tf of timeframes) {
+        const length = data[symbol]?.[tf]?.length ?? 0;
+        max = Math.max(max, length);
+      }
+    }
+    return max;
+  };
+
+  // Replay engine control functions
+  const stepForward = () => {
+    const maxLength = getMaxDataLength();
+    setReplayIndex((i) => Math.min(i + 1, Math.max(0, maxLength - 1)));
+  };
+
+  const stepBackward = () => {
+    setReplayIndex((i) => Math.max(0, i - 1));
+  };
+
+  const resetReplay = () => {
+    const maxLength = getMaxDataLength();
+    setReplayIndex(Math.min(100, Math.max(0, maxLength - 1)));
+  };
+
+  // When entering replay mode, jump to last candle (pause at current market state)
+  useEffect(() => {
+    if (isReplay) {
+      const maxLength = getMaxDataLength();
+      setReplayIndex(Math.max(0, maxLength - 1)); // freeze at last available candle
+    }
+  }, [isReplay]);
 
   // Keep dataRef in sync with state (including historical loads)
   useEffect(() => {
@@ -193,6 +236,30 @@ function AppInner() {
     createDefaultWorkspace(defaultWorkspace);
     setActiveWorkspace(defaultWorkspace.id);
   }, [workspaces.length, createDefaultWorkspace, setActiveWorkspace]);
+
+  // Load historical candles on startup
+  useEffect(() => {
+    const symbols = ["nq", "es"];
+    const timeframes = ["15s", "1m", "3m"];
+
+    async function loadHistorical() {
+      for (const symbol of symbols) {
+        for (const tf of timeframes) {
+          try {
+            const candles = await invoke<any[]>("get_historical", {
+              symbol,
+              timeframe: tf,
+            });
+            setCandleData(symbol, tf, candles);
+          } catch (error) {
+            console.error(`[App] Failed to load ${symbol}/${tf}:`, error);
+          }
+        }
+      }
+    }
+
+    loadHistorical();
+  }, [setCandleData]);
 
   // Persist chart data to localStorage on every change
   useEffect(() => {
@@ -234,6 +301,9 @@ function AppInner() {
     const unlisteners: Array<() => void> = [];
 
     function updateSymbol(symbol: string, tf: Timeframe, candle: Candle) {
+      // Skip live updates when replaying historical data
+      if (isReplay) return;
+
       const current = dataRef.current[symbol][tf] || [];
       const updated = upsertCandleSeries(current, candle);
 
@@ -291,12 +361,21 @@ function AppInner() {
       cancelled = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, []);
+  }, [isReplay]);
 
   return (
     <div className="app-shell">
       <div className="app-shell__toolbar">
-        <TopBar layoutType={layoutType} setLayoutType={setLayoutType} />
+        <TopBar
+          layoutType={layoutType}
+          setLayoutType={setLayoutType}
+          isReplay={isReplay}
+          setIsReplay={setIsReplay}
+          replayIndex={replayIndex}
+          stepForward={stepForward}
+          stepBackward={stepBackward}
+          resetReplay={resetReplay}
+        />
       </div>
 
       <div style={{ display: "flex", height: "100%" }}>
@@ -310,6 +389,8 @@ function AppInner() {
             setActiveChart={setActiveChart}
             tool={tool}
             magnet={magnet}
+            isReplay={isReplay}
+            replayIndex={replayIndex}
           />
         </div>
       </div>

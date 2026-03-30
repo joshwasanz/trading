@@ -205,6 +205,8 @@ export default function LayoutManager({
   setActiveChart,
   tool,
   magnet,
+  isReplay,
+  replayIndex,
 }: any) {
   const [vSplit, setVSplit] = useState(0.5);
   const [hSplit, setHSplit] = useState(0.5);
@@ -426,6 +428,8 @@ export default function LayoutManager({
       onFocus={onFocus}
       onSymbolChange={(symbol) => updatePanel(panel.id, { symbol })}
       onTimeframeChange={(timeframe) => updatePanel(panel.id, { timeframe })}
+      isReplay={isReplay}
+      replayIndex={replayIndex}
       {...sharedProps}
     />
   );

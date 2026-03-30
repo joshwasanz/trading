@@ -11,6 +11,7 @@ import {
 } from "lightweight-charts";
 import { useToolStore } from "./store/useToolStore";
 import { useThemeStore } from "./store/useThemeStore";
+import { useCandleStore } from "./store/useCandleStore";
 import DrawingStylePanel from "./components/DrawingStylePanel";
 import {
   DEFAULT_TRENDLINE_EXTENSION,
@@ -48,6 +49,8 @@ type Props = {
   tool?: string | null;
   magnet?: boolean;
   hidden?: boolean;
+  isReplay?: boolean;
+  replayIndex?: number;
 };
 
 type ScreenPoint = {
@@ -315,6 +318,8 @@ export default function Chart({
   tool,
   magnet = false,
   hidden = false,
+  isReplay = false,
+  replayIndex = 0,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -353,6 +358,7 @@ export default function Chart({
 
   const setTool = useToolStore((state) => state.setTool);
   const { theme } = useThemeStore();
+  const candleStoreData = useCandleStore((state) => state.data);
   const [drawingStep, setDrawingStep] = useState<"none" | "started">("none");
   const [selectedDrawing, setSelectedDrawing] = useState<DrawingSelection | null>(null);
   const [chartReady, setChartReady] = useState(false);
@@ -1602,7 +1608,22 @@ export default function Chart({
     if (!seriesRef.current || !chartRef.current) return;
 
     try {
-      const nextData = data.map((candle) => ({
+      // Priority: use live data if available, otherwise fallback to historical from store
+      // seriesKey format: "nq" (symbol part before the timeframe)
+      const symbol = seriesKey;
+      const candlesFromStore = candleStoreData[symbol] ? Object.values(candleStoreData[symbol]).flat() : [];
+      let displayData: Candle[] = data.length > 0 
+        ? data 
+        : candlesFromStore;
+
+      // Apply replay slicing if in replay mode
+      // Safety: bound replayIndex to actual data length to prevent blank charts on symbol/timeframe switches
+      if (isReplay && replayIndex > 0) {
+        const safeIndex = Math.min(replayIndex, displayData.length);
+        displayData = displayData.slice(0, safeIndex);
+      }
+
+      const nextData = displayData.map((candle) => ({
         ...candle,
         time: candle.time as UTCTimestamp,
       })) as CandlestickData<Time>[];
@@ -1631,7 +1652,7 @@ export default function Chart({
     } catch (error) {
       console.error("[Chart] setData error:", error);
     }
-  }, [data, scheduleOverlayDraw]);
+  }, [data, candleStoreData, seriesKey, isReplay, replayIndex, scheduleOverlayDraw]);
 
   useEffect(() => {
     scheduleOverlayDraw();
