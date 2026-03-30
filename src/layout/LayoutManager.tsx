@@ -3,6 +3,7 @@ import ChartPanel from "./ChartPanel";
 import { useThemeStore } from "../store/useThemeStore";
 import { useWorkspaceStore } from "../store/useWorkspaceStore";
 import { useLayoutState } from "../store/useLayoutState";
+import type { Timeframe } from "../types/marketData";
 import {
   DEFAULT_TRENDLINE_EXTENSION,
   EMPTY_CHART_DRAWINGS,
@@ -22,8 +23,6 @@ import {
   isTrendlineDrawing,
 } from "../types/drawings";
 
-type Timeframe = "15s" | "1m" | "3m";
-
 type Panel = {
   id: string;
   symbol: string;
@@ -41,6 +40,7 @@ const DEFAULT_PANELS: Panel[] = [
 
 const DRAWINGS_STORAGE_KEY = "layout-manager-drawings-v2";
 const LEGACY_DRAWINGS_STORAGE_KEY = "layout-manager-drawings-v1";
+const MAX_DRAWING_HISTORY = 100;
 const DEFAULT_PANEL_SYMBOL_BY_ID = Object.fromEntries(
   DEFAULT_PANELS.map((panel) => [panel.id, panel.symbol])
 ) as Record<string, string>;
@@ -198,6 +198,110 @@ function mergeUniqueById<T extends { id: string }>(items: T[]): T[] {
   return Array.from(new Map(items.map((item) => [item.id, item])).values());
 }
 
+function cloneDrawing<T extends Drawing>(drawing: T): T {
+  if (isTrendlineDrawing(drawing) || isRectangleDrawing(drawing)) {
+    return {
+      ...drawing,
+      start: { ...drawing.start },
+      end: { ...drawing.end },
+    } as T;
+  }
+
+  return { ...drawing } as T;
+}
+
+function cloneChartDrawings(value: ChartDrawings): ChartDrawings {
+  return {
+    trendlines: value.trendlines.map((line) => cloneDrawing(line)),
+    rectangles: value.rectangles.map((rect) => cloneDrawing(rect)),
+    texts: value.texts.map((text) => cloneDrawing(text)),
+  };
+}
+
+function cloneDrawingsState(value: DrawingsState): DrawingsState {
+  return Object.fromEntries(
+    Object.entries(value).map(([symbol, drawings]) => [
+      symbol,
+      cloneChartDrawings(drawings),
+    ])
+  );
+}
+
+function chartDrawingsEquals(a: ChartDrawings, b: ChartDrawings): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function drawingsStateEquals(a: DrawingsState, b: DrawingsState): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function trimHistoryStack(stack: DrawingsState[]): DrawingsState[] {
+  return stack.length > MAX_DRAWING_HISTORY
+    ? stack.slice(stack.length - MAX_DRAWING_HISTORY)
+    : stack;
+}
+
+function applyDrawingUpdate(
+  current: ChartDrawings,
+  selection: DrawingSelection,
+  nextDrawing: Drawing
+): ChartDrawings {
+  if (selection.type === "trendline") {
+    if (!isTrendlineDrawing(nextDrawing)) return current;
+
+    let found = false;
+    const trendlines = current.trendlines.map((line) => {
+      if (line.id !== selection.id) return line;
+      found = true;
+      return cloneDrawing(nextDrawing);
+    });
+
+    return found
+      ? {
+          trendlines,
+          rectangles: current.rectangles,
+          texts: current.texts,
+        }
+      : current;
+  }
+
+  if (selection.type === "rectangle") {
+    if (!isRectangleDrawing(nextDrawing)) return current;
+
+    let found = false;
+    const rectangles = current.rectangles.map((rect) => {
+      if (rect.id !== selection.id) return rect;
+      found = true;
+      return cloneDrawing(nextDrawing);
+    });
+
+    return found
+      ? {
+          trendlines: current.trendlines,
+          rectangles,
+          texts: current.texts,
+        }
+      : current;
+  }
+
+  if (!isTextDrawing(nextDrawing)) return current;
+
+  let found = false;
+  const texts = current.texts.map((text) => {
+    if (text.id !== selection.id) return text;
+    found = true;
+    return cloneDrawing(nextDrawing);
+  });
+
+  return found
+    ? {
+        trendlines: current.trendlines,
+        rectangles: current.rectangles,
+        texts,
+      }
+    : current;
+}
+
 function mergeChartDrawings(current: ChartDrawings, incoming: ChartDrawings): ChartDrawings {
   return {
     trendlines: mergeUniqueById([...current.trendlines, ...incoming.trendlines]),
@@ -246,12 +350,14 @@ export default function LayoutManager({
   magnet,
   isReplay,
   isReplaySelectingStart,
+  replaySelectionPanelId,
   replayStartTime,
   replayCursorTime,
   replayIndex,
   isReplaySync,
   onReplayStart,
   showSessions,
+  registerHistoryControls,
 }: any) {
   const [vSplit, setVSplit] = useState(0.5);
   const [hSplit, setHSplit] = useState(0.5);
@@ -259,6 +365,8 @@ export default function LayoutManager({
   const [focused, setFocused] = useState<string | null>(null);
   const [drawingsBySymbol, setDrawingsBySymbol] = useState<DrawingsState>(() => readStoredDrawings());
   const [hiddenSymbols, setHiddenSymbols] = useState<Record<string, boolean>>({});
+  const [undoStack, setUndoStack] = useState<DrawingsState[]>([]);
+  const [redoStack, setRedoStack] = useState<DrawingsState[]>([]);
 
   const { setMode, setPreset } = useThemeStore();
   const { workspaces, activeWorkspaceId, updateWorkspace } = useWorkspaceStore();
@@ -291,6 +399,8 @@ export default function LayoutManager({
     // Apply workspace state
     setPanels(workspace.panels);
     setDrawingsBySymbol(normalizeDrawingsState(workspace.drawingsBySymbol));
+    setUndoStack([]);
+    setRedoStack([]);
     setMode(workspace.theme.mode);
     setPreset(workspace.theme.preset);
     // layoutType is controlled by parent, so we don't modify it here
@@ -327,13 +437,53 @@ export default function LayoutManager({
     [drawingsBySymbol]
   );
 
+  const commitDrawingsChange = useCallback(
+    (updater: (current: DrawingsState) => DrawingsState) => {
+      setDrawingsBySymbol((current) => {
+        const before = cloneDrawingsState(current);
+        const after = updater(current);
+
+        if (drawingsStateEquals(before, after)) {
+          return current;
+        }
+
+        setUndoStack((prev) => trimHistoryStack([...prev, before]));
+        setRedoStack([]);
+        return after;
+      });
+    },
+    []
+  );
+
   const updateSymbolDrawings = useCallback(
+    (symbol: string, updater: (current: ChartDrawings) => ChartDrawings) => {
+      commitDrawingsChange((prev) => {
+        const current = prev[symbol] ?? EMPTY_CHART_DRAWINGS;
+        const next = updater(current);
+        if (chartDrawingsEquals(current, next)) {
+          return prev;
+        }
+        return {
+          ...prev,
+          [symbol]: next,
+        };
+      });
+    },
+    [commitDrawingsChange]
+  );
+
+  const previewSymbolDrawings = useCallback(
     (symbol: string, updater: (current: ChartDrawings) => ChartDrawings) => {
       setDrawingsBySymbol((prev) => {
         const current = prev[symbol] ?? EMPTY_CHART_DRAWINGS;
+        const next = updater(current);
+        if (chartDrawingsEquals(current, next)) {
+          return prev;
+        }
+
         return {
           ...prev,
-          [symbol]: updater(current),
+          [symbol]: next,
         };
       });
     },
@@ -390,44 +540,106 @@ export default function LayoutManager({
       selection: DrawingSelection,
       nextDrawing: Drawing
     ) => {
-      updateSymbolDrawings(symbol, (current) => {
-        if (selection.type === "trendline") {
-          return {
-            trendlines: current.trendlines.map((line) =>
-              line.id === selection.id && isTrendlineDrawing(nextDrawing)
-                ? nextDrawing
-                : line
-            ),
-            rectangles: current.rectangles,
-            texts: current.texts,
-          };
-        }
-
-        if (selection.type === "rectangle") {
-          return {
-            trendlines: current.trendlines,
-            rectangles: current.rectangles.map((rect) =>
-              rect.id === selection.id && isRectangleDrawing(nextDrawing)
-                ? nextDrawing
-                : rect
-            ),
-            texts: current.texts,
-          };
-        }
-
-        return {
-          trendlines: current.trendlines,
-          rectangles: current.rectangles,
-          texts: current.texts.map((text) =>
-            text.id === selection.id && isTextDrawing(nextDrawing)
-              ? nextDrawing
-              : text
-          ),
-        };
-      });
+      updateSymbolDrawings(symbol, (current) =>
+        applyDrawingUpdate(current, selection, nextDrawing)
+      );
     },
     [updateSymbolDrawings]
   );
+
+  const handlePreviewDrawing = useCallback(
+    (
+      symbol: string,
+      selection: DrawingSelection,
+      nextDrawing: Drawing
+    ) => {
+      previewSymbolDrawings(symbol, (current) =>
+        applyDrawingUpdate(current, selection, nextDrawing)
+      );
+    },
+    [previewSymbolDrawings]
+  );
+
+  const handleCommitPreviewDrawing = useCallback(
+    (
+      symbol: string,
+      selection: DrawingSelection,
+      previousDrawing: Drawing,
+      nextDrawing: Drawing
+    ) => {
+      setDrawingsBySymbol((currentState) => {
+        const currentSymbolDrawings = currentState[symbol] ?? EMPTY_CHART_DRAWINGS;
+        const beforeState = cloneDrawingsState(currentState);
+        const afterState = cloneDrawingsState(currentState);
+
+        beforeState[symbol] = applyDrawingUpdate(
+          beforeState[symbol] ?? EMPTY_CHART_DRAWINGS,
+          selection,
+          previousDrawing
+        );
+        afterState[symbol] = applyDrawingUpdate(
+          currentSymbolDrawings,
+          selection,
+          nextDrawing
+        );
+
+        if (drawingsStateEquals(beforeState, afterState)) {
+          return currentState;
+        }
+
+        setUndoStack((prev) => trimHistoryStack([...prev, beforeState]));
+        setRedoStack([]);
+        return afterState;
+      });
+    },
+    []
+  );
+
+  const canUndo = undoStack.length > 0;
+  const canRedo = redoStack.length > 0;
+
+  const undoDrawings = useCallback(() => {
+    setUndoStack((prevUndo) => {
+      if (prevUndo.length === 0) return prevUndo;
+
+      const previous = prevUndo[prevUndo.length - 1];
+
+      setDrawingsBySymbol((current) => {
+        setRedoStack((prevRedo) =>
+          trimHistoryStack([...prevRedo, cloneDrawingsState(current)])
+        );
+        return cloneDrawingsState(previous);
+      });
+
+      return prevUndo.slice(0, -1);
+    });
+  }, []);
+
+  const redoDrawings = useCallback(() => {
+    setRedoStack((prevRedo) => {
+      if (prevRedo.length === 0) return prevRedo;
+
+      const next = prevRedo[prevRedo.length - 1];
+
+      setDrawingsBySymbol((current) => {
+        setUndoStack((prevUndo) =>
+          trimHistoryStack([...prevUndo, cloneDrawingsState(current)])
+        );
+        return cloneDrawingsState(next);
+      });
+
+      return prevRedo.slice(0, -1);
+    });
+  }, []);
+
+  useEffect(() => {
+    registerHistoryControls?.({
+      canUndo,
+      canRedo,
+      undo: undoDrawings,
+      redo: redoDrawings,
+    });
+  }, [registerHistoryControls, canUndo, canRedo, undoDrawings, redoDrawings]);
 
   const hideDrawings = useCallback((symbol: string) => {
     setHiddenSymbols((prev) => ({
@@ -444,15 +656,12 @@ export default function LayoutManager({
   }, []);
 
   const clearDrawings = useCallback((symbol: string) => {
-    setDrawingsBySymbol((prev) => ({
-      ...prev,
-      [symbol]: {
-        trendlines: [],
-        rectangles: [],
-        texts: [],
-      },
+    updateSymbolDrawings(symbol, () => ({
+      trendlines: [],
+      rectangles: [],
+      texts: [],
     }));
-  }, []);
+  }, [updateSymbolDrawings]);
 
   const renderPanel = (panel: Panel, onFocus: () => void) => (
     <ChartPanel
@@ -467,6 +676,8 @@ export default function LayoutManager({
       onAddText={handleAddText}
       onDeleteDrawing={handleDeleteDrawing}
       onUpdateDrawing={handleUpdateDrawing}
+      onPreviewDrawing={handlePreviewDrawing}
+      onCommitPreviewDrawing={handleCommitPreviewDrawing}
       onHideDrawings={() => hideDrawings(panel.symbol)}
       onShowDrawings={() => showDrawings(panel.symbol)}
       onClearDrawings={() => clearDrawings(panel.symbol)}
@@ -475,11 +686,16 @@ export default function LayoutManager({
       onTimeframeChange={(timeframe) => updatePanel(panel.id, { timeframe })}
       isReplay={isReplay}
       isReplaySelectingStart={isReplaySelectingStart}
+      replaySelectionPanelId={replaySelectionPanelId}
       replayStartTime={replayStartTime}
       replayCursorTime={replayCursorTime}
       replayIndex={replayIndex}
       isReplaySync={isReplaySync}
       onReplayStart={onReplayStart}
+      canUndo={canUndo}
+      canRedo={canRedo}
+      onUndo={undoDrawings}
+      onRedo={redoDrawings}
       showSessions={showSessions}
       {...sharedProps}
     />

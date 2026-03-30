@@ -1,4 +1,5 @@
 import Chart from "../Chart";
+import type { Candle, Timeframe } from "../types/marketData";
 import type { ReplayStartPayload } from "../types/replay";
 import type {
   ChartDrawings,
@@ -9,13 +10,11 @@ import type {
   Trendline,
 } from "../types/drawings";
 
-type Timeframe = "15s" | "1m" | "3m";
-
 type Props = {
   panelId: string;
   symbol: string;
   timeframe: Timeframe;
-  data: any[];
+  data: Candle[];
   drawings: ChartDrawings;
   drawingsHidden?: boolean;
   onAddTrendline: (symbol: string, line: Trendline) => void;
@@ -26,6 +25,17 @@ type Props = {
     symbol: string,
     selection: DrawingSelection,
     drawing: Drawing
+  ) => void;
+  onPreviewDrawing?: (
+    symbol: string,
+    selection: DrawingSelection,
+    drawing: Drawing
+  ) => void;
+  onCommitPreviewDrawing?: (
+    symbol: string,
+    selection: DrawingSelection,
+    previousDrawing: Drawing,
+    nextDrawing: Drawing
   ) => void;
   onFocus: () => void;
   onSymbolChange?: (symbol: string) => void;
@@ -39,11 +49,16 @@ type Props = {
   onClearDrawings?: () => void;
   isReplay?: boolean;
   isReplaySelectingStart?: boolean;
+  replaySelectionPanelId?: string | null;
   replayStartTime?: number | null;
   replayCursorTime?: number | null;
   replayIndex?: number;
   isReplaySync?: boolean;
   onReplayStart?: (payload: ReplayStartPayload) => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
   showSessions?: boolean;
 };
 
@@ -59,6 +74,8 @@ export default function ChartPanel({
   onAddText,
   onDeleteDrawing,
   onUpdateDrawing,
+  onPreviewDrawing,
+  onCommitPreviewDrawing,
   onFocus,
   onSymbolChange,
   onTimeframeChange,
@@ -71,11 +88,16 @@ export default function ChartPanel({
   onClearDrawings,
   isReplay,
   isReplaySelectingStart,
+  replaySelectionPanelId,
   replayStartTime,
   replayCursorTime,
   replayIndex,
   isReplaySync,
   onReplayStart,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
 }: Props) {
   const chartId = panelId;
   const hasDrawings =
@@ -186,6 +208,17 @@ export default function ChartPanel({
               ? (selection, drawing) => onUpdateDrawing(symbol, selection, drawing)
               : undefined
           }
+          onPreviewDrawing={
+            onPreviewDrawing
+              ? (selection, drawing) => onPreviewDrawing(symbol, selection, drawing)
+              : undefined
+          }
+          onCommitPreviewDrawing={
+            onCommitPreviewDrawing
+              ? (selection, previousDrawing, nextDrawing) =>
+                  onCommitPreviewDrawing(symbol, selection, previousDrawing, nextDrawing)
+              : undefined
+          }
           activeChart={activeChart}
           setActiveChart={setActiveChart}
           tool={tool}
@@ -193,11 +226,16 @@ export default function ChartPanel({
           hidden={drawingsHidden}
           isReplay={isReplay}
           isReplaySelectingStart={isReplaySelectingStart}
+          replaySelectionPanelId={replaySelectionPanelId}
           replayStartTime={replayStartTime}
           replayCursorTime={replayCursorTime}
           replayIndex={replayIndex}
           isReplaySync={isReplaySync}
           onReplayStart={onReplayStart}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          onUndo={onUndo}
+          onRedo={onRedo}
         />
       </div>
     </div>

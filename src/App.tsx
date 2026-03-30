@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
 import TopBar from "./components/TopBar";
 import LayoutManager from "./layout/LayoutManager";
 import Sidebar from "./components/SideBar";
@@ -11,22 +9,14 @@ import { useWorkspaceStore } from "./store/useWorkspaceStore";
 import { useCandleStore } from "./store/useCandleStore";
 import { useLayoutState } from "./store/useLayoutState";
 import { EMPTY_CHART_DRAWINGS } from "./types/drawings";
+import { marketDataProvider } from "./data/providers";
+import type { Candle, SupportedSymbol, Timeframe } from "./types/marketData";
 import type { ReplayStartPayload } from "./types/replay";
 import { getSessionRange, type SessionKey } from "./types/sessions";
 import { findCandleIndexAtOrBefore } from "./utils/replay";
 
-type Candle = {
-  symbol: string;
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-};
-
-type Timeframe = "15s" | "1m" | "3m";
-
 const DATA_STORAGE_KEY = "chart-data-v1";
+const SUPPORTED_TIMEFRAMES: Timeframe[] = ["15s", "1m", "3m"];
 
 type Panel = {
   id: string;
@@ -51,8 +41,10 @@ const initialDataState: Record<string, Record<Timeframe, Candle[]>> = {
   nq: createEmptyTimeframeData(),
   es: createEmptyTimeframeData(),
 };
-
-let startStreamsPromise: Promise<void> | null = null;
+const DEFAULT_SUPPORTED_SYMBOLS: SupportedSymbol[] = [
+  { id: "nq", label: "NASDAQ" },
+  { id: "es", label: "S&P 500" },
+];
 
 function readStoredData(): Record<string, Record<Timeframe, Candle[]>> {
   if (typeof window === "undefined") return initialDataState;
@@ -111,6 +103,23 @@ function upsertCandleSeries(current: Candle[], incoming: Candle): Candle[] {
   return next;
 }
 
+function mergeHistoricalSeries(existing: Candle[], historical: Candle[]): Candle[] {
+  if (historical.length === 0) return existing;
+
+  const merged = [...historical];
+
+  for (const live of existing) {
+    const index = merged.findIndex((candle) => candle.time === live.time);
+    if (index !== -1) {
+      merged[index] = live;
+    } else if (live.time > merged[merged.length - 1].time) {
+      merged.push(live);
+    }
+  }
+
+  return merged;
+}
+
 // ─── Historical Loader ────────────────────────────────────────────────────────
 
 async function loadHistorical(
@@ -119,7 +128,7 @@ async function loadHistorical(
   setData: React.Dispatch<React.SetStateAction<typeof initialDataState>>
 ) {
   try {
-    const candles = await invoke<Candle[]>("get_historical", {
+    const candles = await marketDataProvider.getHistorical({
       symbol,
       timeframe: tf,
     });
@@ -130,16 +139,7 @@ async function loadHistorical(
       const existing = prev[symbol]?.[tf] ?? [];
 
       // Historical candles form the base — live candles sit on top
-      const merged = [...candles];
-
-      for (const live of existing) {
-        const idx = merged.findIndex((c) => c.time === live.time);
-        if (idx !== -1) {
-          merged[idx] = live; // live overwrites the same candle
-        } else if (live.time > merged[merged.length - 1].time) {
-          merged.push(live); // newer live candles append to the end
-        }
-      }
+      const merged = mergeHistoricalSeries(existing, candles);
 
       return {
         ...prev,
@@ -153,6 +153,7 @@ async function loadHistorical(
     console.warn(`[historical] Failed for ${symbol}/${tf}:`, err);
   }
 }
+void loadHistorical;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -183,6 +184,8 @@ void findIndexByTime;
 function AppInner() {
   const [data, setData] = useState(() => readStoredData());
   const dataRef = useRef(data);
+  const undoHistoryRef = useRef<(() => void) | null>(null);
+  const redoHistoryRef = useRef<(() => void) | null>(null);
 
   const [activeChart, setActiveChart] = useState<string | null>(null);
   const [layoutType, setLayoutType] = useState("2");
@@ -190,6 +193,7 @@ function AppInner() {
   // Replay engine state
   const [isReplay, setIsReplay] = useState(false);
   const [isReplaySelectingStart, setIsReplaySelectingStart] = useState(false);
+  const [replaySelectionPanelId, setReplaySelectionPanelId] = useState<string | null>(null);
   const [replayStartTime, setReplayStartTime] = useState<number | null>(null);
   const [replayCursorTime, setReplayCursorTime] = useState<number | null>(null);
   const [replayIndex, setReplayIndex] = useState(0);
@@ -198,6 +202,10 @@ function AppInner() {
   const [isReplaySync, setIsReplaySync] = useState(false);
   const [jumpTime, setJumpTime] = useState("");
   const [showSessions, setShowSessions] = useState(false);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  const [supportedSymbols, setSupportedSymbols] =
+    useState<SupportedSymbol[]>(DEFAULT_SUPPORTED_SYMBOLS);
 
   const tool = useToolStore((state) => state.tool);
   const magnet = useToolStore((state) => state.magnet);
@@ -237,6 +245,29 @@ function AppInner() {
     },
     [getReplayPanelState]
   );
+
+  const registerHistoryControls = useCallback(
+    (controls: {
+      canUndo: boolean;
+      canRedo: boolean;
+      undo: () => void;
+      redo: () => void;
+    }) => {
+      setCanUndo(controls.canUndo);
+      setCanRedo(controls.canRedo);
+      undoHistoryRef.current = controls.undo;
+      redoHistoryRef.current = controls.redo;
+    },
+    []
+  );
+
+  const undoDrawings = useCallback(() => {
+    undoHistoryRef.current?.();
+  }, []);
+
+  const redoDrawings = useCallback(() => {
+    redoHistoryRef.current?.();
+  }, []);
 
   const moveReplayCursor = useCallback(
     (direction: -1 | 1) => {
@@ -303,24 +334,35 @@ function AppInner() {
     if (!nextIsReplay) {
       setIsReplay(false);
       setIsReplaySelectingStart(false);
+      setReplaySelectionPanelId(null);
       setReplayStartTime(null);
       setReplayCursorTime(null);
       setReplayIndex(0);
       return;
     }
 
+    const targetPanelId = activeChart ?? panels[0]?.id ?? null;
     setIsReplay(true);
     setIsReplaySelectingStart(true);
+    setReplaySelectionPanelId(targetPanelId);
+    if (targetPanelId) {
+      setActiveChart(targetPanelId);
+    }
     setReplayStartTime(null);
     setReplayCursorTime(null);
     setReplayIndex(0);
-  }, []);
+  }, [activeChart, panels]);
 
   const armReplaySelection = useCallback(() => {
+    const targetPanelId = activeChart ?? panels[0]?.id ?? null;
     setIsReplay(true);
     setIsPlaying(false);
     setIsReplaySelectingStart(true);
-  }, []);
+    setReplaySelectionPanelId(targetPanelId);
+    if (targetPanelId) {
+      setActiveChart(targetPanelId);
+    }
+  }, [activeChart, panels]);
 
   const handleReplayStart = useCallback(
     (payload: ReplayStartPayload) => {
@@ -330,6 +372,7 @@ function AppInner() {
       setActiveChart(payload.panelId);
       setIsReplay(true);
       setIsReplaySelectingStart(false);
+      setReplaySelectionPanelId(null);
       setIsPlaying(false);
       setReplayStartTime(resolved.timestamp);
       setReplayCursorTime(resolved.timestamp);
@@ -347,6 +390,7 @@ function AppInner() {
 
     setIsReplay(true);
     setIsReplaySelectingStart(false);
+    setReplaySelectionPanelId(null);
     setIsPlaying(false);
     setReplayIndex(resolved.index);
     setReplayCursorTime(resolved.timestamp);
@@ -428,29 +472,36 @@ function AppInner() {
     setActiveWorkspace(defaultWorkspace.id);
   }, [workspaces.length, createDefaultWorkspace, setActiveWorkspace]);
 
-  // Load historical candles on startup
   useEffect(() => {
-    const symbols = ["nq", "es"];
-    const timeframes = ["15s", "1m", "3m"];
+    let cancelled = false;
 
-    async function loadHistorical() {
-      for (const symbol of symbols) {
-        for (const tf of timeframes) {
-          try {
-            const candles = await invoke<any[]>("get_historical", {
-              symbol,
-              timeframe: tf,
-            });
-            setCandleData(symbol, tf, candles);
-          } catch (error) {
-            console.error(`[App] Failed to load ${symbol}/${tf}:`, error);
-          }
+    async function loadSupportedSymbols() {
+      try {
+        const nextSymbols = await marketDataProvider.getSupportedSymbols();
+        if (!cancelled && nextSymbols.length > 0) {
+          setSupportedSymbols((current) => {
+            const sameSymbols =
+              current.length === nextSymbols.length &&
+              current.every(
+                (symbol, index) =>
+                  symbol.id === nextSymbols[index]?.id &&
+                  symbol.label === nextSymbols[index]?.label
+              );
+
+            return sameSymbols ? current : nextSymbols;
+          });
         }
+      } catch (error) {
+        console.warn("[App] Falling back to default symbol list:", error);
       }
     }
 
-    loadHistorical();
-  }, [setCandleData]);
+    void loadSupportedSymbols();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Persist chart data to localStorage on every change
   useEffect(() => {
@@ -474,85 +525,131 @@ function AppInner() {
     root.style.setProperty("--grid-color", theme.grid);
   }, [theme]);
 
-  // Load historical data on mount for all symbol/timeframe combos
-  useEffect(() => {
-    const symbols = ["nq", "es"];
-    const timeframes: Timeframe[] = ["15s", "1m", "3m"];
-
-    for (const symbol of symbols) {
-      for (const tf of timeframes) {
-        loadHistorical(symbol, tf, setData);
-      }
-    }
-  }, []);
-
-  // Register live stream listeners
   useEffect(() => {
     let cancelled = false;
-    const unlisteners: Array<() => void> = [];
 
-    function updateSymbol(symbol: string, tf: Timeframe, candle: Candle) {
-      // Skip live updates when replaying historical data
-      if (isReplay) return;
+    async function loadHistoricalData() {
+      const historicalEntries: Array<{
+        symbol: string;
+        timeframe: Timeframe;
+        candles: Candle[];
+      }> = [];
 
-      const current = dataRef.current[symbol][tf] || [];
-      const updated = upsertCandleSeries(current, candle);
+      for (const { id: symbol } of supportedSymbols) {
+        for (const timeframe of SUPPORTED_TIMEFRAMES) {
+          try {
+            const candles = await marketDataProvider.getHistorical({
+              symbol,
+              timeframe,
+            });
 
-      const nextState = {
-        ...dataRef.current,
-        [symbol]: {
-          ...dataRef.current[symbol],
-          [tf]: updated,
-        },
-      };
+            if (cancelled) {
+              return;
+            }
 
-      dataRef.current = nextState;
-      setData(nextState);
-    }
-
-    async function register(symbol: string, tf: Timeframe) {
-      const liveEvent = `candle_live_${tf}_${symbol}`;
-      const newEvent = `candle_new_${tf}_${symbol}`;
-
-      const unlistenLive = await listen<Candle>(liveEvent, (event) => {
-        if (!cancelled) updateSymbol(symbol, tf, event.payload);
-      });
-
-      const unlistenNew = await listen<Candle>(newEvent, (event) => {
-        if (!cancelled) updateSymbol(symbol, tf, event.payload);
-      });
-
-      unlisteners.push(unlistenLive, unlistenNew);
-    }
-
-    async function setup() {
-      try {
-        const symbols = ["nq", "es"];
-        const timeframes: Timeframe[] = ["15s", "1m", "3m"];
-
-        for (const symbol of symbols) {
-          for (const timeframe of timeframes) {
-            await register(symbol, timeframe);
+            historicalEntries.push({ symbol, timeframe, candles });
+            setCandleData(symbol, timeframe, candles);
+          } catch (error) {
+            console.error(`[App] Failed to load ${symbol}/${timeframe}:`, error);
           }
         }
+      }
 
-        if (!startStreamsPromise) {
-          startStreamsPromise = invoke("start_all_streams") as Promise<void>;
+      if (cancelled || historicalEntries.length === 0) {
+        return;
+      }
+
+      setData((prev) => {
+        let nextState = prev;
+
+        for (const entry of historicalEntries) {
+          if (entry.candles.length === 0) continue;
+
+          const currentSymbolData = nextState[entry.symbol] ?? createEmptyTimeframeData();
+          const merged = mergeHistoricalSeries(
+            currentSymbolData[entry.timeframe] ?? [],
+            entry.candles
+          );
+
+          nextState = {
+            ...nextState,
+            [entry.symbol]: {
+              ...currentSymbolData,
+              [entry.timeframe]: merged,
+            },
+          };
         }
 
-        await startStreamsPromise;
-      } catch (error) {
-        console.error("Stream init error:", error);
-      }
+        dataRef.current = nextState;
+        return nextState;
+      });
     }
 
-    setup();
+    void loadHistoricalData();
 
     return () => {
       cancelled = true;
-      unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [isReplay]);
+  }, [setCandleData, supportedSymbols]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const subscriptions: Array<{ unsubscribe: () => Promise<void> | void }> = [];
+
+    async function subscribeToLiveData() {
+      try {
+        for (const { id: symbol } of supportedSymbols) {
+          for (const timeframe of SUPPORTED_TIMEFRAMES) {
+            const subscription = await marketDataProvider.subscribeLive(
+              symbol,
+              timeframe,
+              (incoming) => {
+                if (cancelled) return;
+
+                setData((prev) => {
+                  const currentSymbolData = prev[symbol] ?? createEmptyTimeframeData();
+                  const updated = upsertCandleSeries(
+                    currentSymbolData[timeframe] ?? [],
+                    incoming
+                  );
+
+                  const nextState = {
+                    ...prev,
+                    [symbol]: {
+                      ...currentSymbolData,
+                      [timeframe]: updated,
+                    },
+                  };
+
+                  dataRef.current = nextState;
+                  return nextState;
+                });
+              }
+            );
+
+            if (cancelled) {
+              await subscription.unsubscribe();
+              return;
+            }
+
+            subscriptions.push(subscription);
+          }
+        }
+      } catch (error) {
+        console.error("[App] Live subscription init error:", error);
+      }
+    }
+
+    void subscribeToLiveData();
+
+    return () => {
+      cancelled = true;
+
+      for (const subscription of subscriptions) {
+        void subscription.unsubscribe();
+      }
+    };
+  }, [supportedSymbols]);
 
   return (
     <div className="app-shell">
@@ -582,6 +679,10 @@ function AppInner() {
           showSessions={showSessions}
           setShowSessions={setShowSessions}
           jumpToSession={jumpToSession}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          onUndo={undoDrawings}
+          onRedo={redoDrawings}
         />
       </div>
 
@@ -598,12 +699,14 @@ function AppInner() {
             magnet={magnet}
             isReplay={isReplay}
             isReplaySelectingStart={isReplaySelectingStart}
+            replaySelectionPanelId={replaySelectionPanelId}
             replayStartTime={replayStartTime}
             replayCursorTime={replayCursorTime}
             replayIndex={replayIndex}
             isReplaySync={isReplaySync}
             onReplayStart={handleReplayStart}
             showSessions={showSessions}
+            registerHistoryControls={registerHistoryControls}
           />
         </div>
       </div>

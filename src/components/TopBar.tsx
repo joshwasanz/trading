@@ -30,6 +30,10 @@ type Props = {
   showSessions?: boolean;
   setShowSessions?: (showSessions: boolean) => void;
   jumpToSession?: (session: SessionKey) => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
 };
 
 export default function TopBar({
@@ -54,6 +58,10 @@ export default function TopBar({
   jumpTime = "",
   setJumpTime,
   goToTime,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
 }: Props) {
   const { mode, setMode, preset, setPreset } = useThemeStore();
   const { workspaces, activeWorkspaceId, setActiveWorkspace, saveWorkspace } = useWorkspaceStore();
@@ -142,6 +150,40 @@ export default function TopBar({
             🗑 Delete
           </button>
         )}
+      </div>
+
+      <div style={{ display: "flex", gap: "4px", alignItems: "center", marginLeft: "12px" }}>
+        <button
+          onClick={() => onUndo?.()}
+          disabled={!canUndo}
+          className="ui-button"
+          style={{
+            height: "28px",
+            padding: "0 10px",
+            fontSize: "12px",
+            opacity: canUndo ? 1 : 0.5,
+            cursor: canUndo ? "pointer" : "not-allowed",
+          }}
+          title="Undo (Ctrl/Cmd+Z)"
+        >
+          Undo
+        </button>
+
+        <button
+          onClick={() => onRedo?.()}
+          disabled={!canRedo}
+          className="ui-button"
+          style={{
+            height: "28px",
+            padding: "0 10px",
+            fontSize: "12px",
+            opacity: canRedo ? 1 : 0.5,
+            cursor: canRedo ? "pointer" : "not-allowed",
+          }}
+          title="Redo (Ctrl/Cmd+Shift+Z / Ctrl/Cmd+Y)"
+        >
+          Redo
+        </button>
       </div>
 
       {/* ================= REPLAY ENGINE ================= */}
@@ -287,7 +329,11 @@ export default function TopBar({
               </span>
 
               <span style={{ fontSize: "12px", color: "var(--panel-muted)" }}>
-                {isReplaySelectingStart ? "Click a candle on any chart" : `Start: ${replayStartLabel}`}
+                {isReplaySelectingStart
+                  ? isReplaySync
+                    ? "Click a candle on any chart"
+                    : "Click a candle on the active chart"
+                  : `Start: ${replayStartLabel}`}
               </span>
 
               <span style={{ fontSize: "12px", color: "var(--panel-muted)" }}>

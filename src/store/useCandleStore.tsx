@@ -1,18 +1,11 @@
 import { create } from "zustand";
+import type { Candle, Timeframe } from "../types/marketData";
 
-export type Candle = {
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-};
-
-type CandleData = Record<string, Record<string, Candle[]>>;
+type CandleData = Record<string, Partial<Record<Timeframe, Candle[]>>>;
 
 type State = {
   data: CandleData;
-  setData: (symbol: string, tf: string, candles: Candle[]) => void;
+  setData: (symbol: string, tf: Timeframe, candles: Candle[]) => void;
   loadFromCache: () => void;
 };
 

@@ -5,6 +5,7 @@ import {
   type CandlestickData,
   type IChartApi,
   type ISeriesApi,
+  type Logical,
   type MouseEventParams,
   type Time,
   type UTCTimestamp,
@@ -13,6 +14,7 @@ import { useToolStore } from "./store/useToolStore";
 import { useThemeStore } from "./store/useThemeStore";
 import { useCandleStore } from "./store/useCandleStore";
 import DrawingStylePanel from "./components/DrawingStylePanel";
+import type { Candle } from "./types/marketData";
 import type { ReplayStartPayload } from "./types/replay";
 import { formatReplayTime } from "./utils/replayDisplay";
 import {
@@ -31,13 +33,40 @@ import {
 } from "./types/drawings";
 import { findCandleIndexAtOrBefore } from "./utils/replay";
 
-type Candle = {
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-};
+function getTimeframeSeconds(timeframe: ReplayStartPayload["timeframe"]): number {
+  switch (timeframe) {
+    case "15s":
+      return 15;
+    case "1m":
+      return 60;
+    case "3m":
+      return 180;
+    default:
+      return 60;
+  }
+}
+
+function resolveTimeFromLogicalIndex(
+  logical: number,
+  candles: Candle[],
+  timeframe: ReplayStartPayload["timeframe"]
+): UTCTimestamp | null {
+  if (!candles.length || !Number.isFinite(logical)) return null;
+
+  const timeframeSeconds = getTimeframeSeconds(timeframe);
+
+  if (logical <= 0) {
+    return (candles[0].time + logical * timeframeSeconds) as UTCTimestamp;
+  }
+
+  if (logical <= candles.length - 1) {
+    const index = Math.max(0, Math.min(candles.length - 1, Math.round(logical)));
+    return candles[index].time as UTCTimestamp;
+  }
+
+  const extraSteps = logical - (candles.length - 1);
+  return (candles[candles.length - 1].time + extraSteps * timeframeSeconds) as UTCTimestamp;
+}
 
 type Props = {
   data: Candle[];
@@ -52,16 +81,27 @@ type Props = {
   onAddText: (text: TextDrawing) => void;
   onDeleteDrawing?: (id: string) => void;
   onUpdateDrawing?: (selection: DrawingSelection, drawing: Drawing) => void;
+  onPreviewDrawing?: (selection: DrawingSelection, drawing: Drawing) => void;
+  onCommitPreviewDrawing?: (
+    selection: DrawingSelection,
+    previousDrawing: Drawing,
+    nextDrawing: Drawing
+  ) => void;
   tool?: string | null;
   magnet?: boolean;
   hidden?: boolean;
   isReplay?: boolean;
   isReplaySelectingStart?: boolean;
+  replaySelectionPanelId?: string | null;
   replayStartTime?: number | null;
   replayCursorTime?: number | null;
   replayIndex?: number;
   isReplaySync?: boolean;
   onReplayStart?: (payload: ReplayStartPayload) => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
 };
 
 type ScreenPoint = {
@@ -361,16 +401,23 @@ export default function Chart({
   onAddText,
   onDeleteDrawing,
   onUpdateDrawing,
+  onPreviewDrawing,
+  onCommitPreviewDrawing,
   tool,
   magnet = false,
   hidden = false,
   isReplay = false,
   isReplaySelectingStart = false,
+  replaySelectionPanelId = null,
   replayStartTime = null,
   replayCursorTime = null,
   replayIndex = 0,
   isReplaySync = false,
   onReplayStart,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -392,7 +439,11 @@ export default function Chart({
   const hiddenRef = useRef(hidden);
   const isReplayRef = useRef(isReplay);
   const isReplaySyncRef = useRef(isReplaySync);
-  const isReplaySelectingStartRef = useRef(isReplaySelectingStart);
+  const isReplaySelectingForThisChart = Boolean(
+    isReplaySelectingStart &&
+      (isReplaySync || replaySelectionPanelId === chartId)
+  );
+  const isReplaySelectingForThisChartRef = useRef(isReplaySelectingForThisChart);
   const replayStartTimeRef = useRef(replayStartTime);
   const replayCursorTimeRef = useRef(replayCursorTime);
   const candleStoreDataRef = useRef<Record<string, Record<string, Candle[]>>>({});
@@ -404,6 +455,8 @@ export default function Chart({
   const onAddTextRef = useRef(onAddText);
   const onDeleteDrawingRef = useRef(onDeleteDrawing);
   const onUpdateDrawingRef = useRef(onUpdateDrawing);
+  const onPreviewDrawingRef = useRef(onPreviewDrawing);
+  const onCommitPreviewDrawingRef = useRef(onCommitPreviewDrawing);
   const onReplayStartRef = useRef(onReplayStart);
 
   const drawStartRef = useRef<Point | null>(null);
@@ -451,8 +504,8 @@ export default function Chart({
   }, [isReplaySync]);
 
   useEffect(() => {
-    isReplaySelectingStartRef.current = isReplaySelectingStart;
-  }, [isReplaySelectingStart]);
+    isReplaySelectingForThisChartRef.current = isReplaySelectingForThisChart;
+  }, [isReplaySelectingForThisChart]);
 
   useEffect(() => {
     replayStartTimeRef.current = replayStartTime;
@@ -511,6 +564,14 @@ export default function Chart({
   }, [onUpdateDrawing]);
 
   useEffect(() => {
+    onPreviewDrawingRef.current = onPreviewDrawing;
+  }, [onPreviewDrawing]);
+
+  useEffect(() => {
+    onCommitPreviewDrawingRef.current = onCommitPreviewDrawing;
+  }, [onCommitPreviewDrawing]);
+
+  useEffect(() => {
     onReplayStartRef.current = onReplayStart;
   }, [onReplayStart]);
 
@@ -528,9 +589,25 @@ export default function Chart({
 
     try {
       const dpr = window.devicePixelRatio || 1;
-      const x = chart.timeScale().timeToCoordinate(point.time);
+      const candles =
+        dataRef.current.length > 0
+          ? dataRef.current
+          : candleStoreDataRef.current[symbolRef.current]?.[timeframeRef.current] ?? [];
       const y = series.priceToCoordinate(point.price);
-      if (x === null || y === null) return null;
+      if (y === null) return null;
+
+      let x = chart.timeScale().timeToCoordinate(point.time);
+
+      if (x === null && candles.length > 0) {
+        const lastIndex = candles.length - 1;
+        const lastCandle = candles[lastIndex];
+        const step = getTimeframeSeconds(timeframeRef.current);
+        const candleOffset = (point.time - lastCandle.time) / step;
+        const logical = lastIndex + candleOffset;
+        x = chart.timeScale().logicalToCoordinate(logical as Logical);
+      }
+
+      if (x === null) return null;
       return { x: x * dpr, y: y * dpr };
     } catch {
       return null;
@@ -726,22 +803,40 @@ export default function Chart({
     [hitTestDrawings, hitTestSelectedHandles]
   );
 
+  const getAvailableCandles = useCallback((): Candle[] => {
+    return dataRef.current.length > 0
+      ? dataRef.current
+      : candleStoreDataRef.current[symbolRef.current]?.[timeframeRef.current] ?? [];
+  }, []);
+
   const pointFromCoordinates = useCallback((x: number, y: number): Point | null => {
     const chart = chartRef.current;
     const series = seriesRef.current;
     if (!chart || !series || !chartReadyRef.current) return null;
 
     try {
-      const time = chart.timeScale().coordinateToTime(x);
+      const candles = getAvailableCandles();
       const price = series.coordinateToPrice(y);
+      if (price === null) return null;
 
-      if (typeof time !== "number" || price === null) return null;
+      const timeFromCoordinate = chart.timeScale().coordinateToTime(x);
+      if (typeof timeFromCoordinate === "number") {
+        return { time: timeFromCoordinate as UTCTimestamp, price };
+      }
 
-      return { time: time as UTCTimestamp, price };
+      const logical = chart.timeScale().coordinateToLogical(x);
+      const resolvedTime =
+        typeof logical === "number"
+          ? resolveTimeFromLogicalIndex(logical, candles, timeframeRef.current)
+          : null;
+
+      if (resolvedTime === null) return null;
+
+      return { time: resolvedTime, price };
     } catch {
       return null;
     }
-  }, []);
+  }, [getAvailableCandles]);
 
   const getRawPointFromParam = useCallback((param: MouseEventParams<Time>): Point | null => {
     const chart = chartRef.current;
@@ -749,37 +844,43 @@ export default function Chart({
     if (!chart || !series || !chartReadyRef.current || !param.point) return null;
 
     try {
+      const candles = getAvailableCandles();
+      const price = series.coordinateToPrice(param.point.y);
+      if (price === null) return null;
+
       const timeFromEvent = param.time;
       const timeFromCoord = chart.timeScale().coordinateToTime(param.point.x);
-      const price = series.coordinateToPrice(param.point.y);
+      const logical =
+        typeof param.logical === "number"
+          ? param.logical
+          : chart.timeScale().coordinateToLogical(param.point.x);
 
-      const time =
+      const time: number | null =
         typeof timeFromEvent === "number"
           ? timeFromEvent
           : typeof timeFromCoord === "number"
             ? timeFromCoord
-            : null;
+            : typeof logical === "number"
+              ? resolveTimeFromLogicalIndex(logical, candles, timeframeRef.current)
+              : null;
 
-      if (time === null || price === null) return null;
+      if (time === null) return null;
 
       return { time: time as UTCTimestamp, price };
     } catch {
       return null;
     }
-  }, []);
+  }, [getAvailableCandles]);
 
   const getNearestCandle = useCallback((param: MouseEventParams<Time>): Candle | null => {
     if (typeof param.logical !== "number") return null;
 
     const index = Math.round(param.logical);
-    const candles =
-      dataRef.current.length > 0
-        ? dataRef.current
-        : candleStoreDataRef.current[symbolRef.current]?.[timeframeRef.current] ?? [];
+    const candles = getAvailableCandles();
     if (index < 0 || index >= candles.length) return null;
 
     return candles[index] ?? null;
-  }, []);
+  }, [getAvailableCandles]);
 
   const applyMagnet = useCallback(
     (param: MouseEventParams<Time>, rawPoint: Point): Point => {
@@ -787,7 +888,19 @@ export default function Chart({
         return rawPoint;
       }
 
-      const candle = getNearestCandle(param);
+      const candles = getAvailableCandles();
+      if (candles.length === 0) return rawPoint;
+
+      const logical =
+        typeof param.logical === "number"
+          ? param.logical
+          : param.point
+            ? chartRef.current?.timeScale().coordinateToLogical(param.point.x)
+            : null;
+      if (typeof logical !== "number") return rawPoint;
+
+      const nearestIndex = Math.max(0, Math.min(candles.length - 1, Math.round(logical)));
+      const candle = candles[nearestIndex];
       if (!candle) return rawPoint;
 
       const levels = [candle.open, candle.high, candle.low, candle.close];
@@ -800,11 +913,14 @@ export default function Chart({
       }
 
       return {
-        time: candle.time as UTCTimestamp,
+        time:
+          logical < 0 || logical > candles.length - 1
+            ? rawPoint.time
+            : (candle.time as UTCTimestamp),
         price: closest,
       };
     },
-    [getNearestCandle]
+    [getAvailableCandles]
   );
 
   const getSnappedPointFromParam = useCallback(
@@ -824,7 +940,7 @@ export default function Chart({
   }, []);
 
   const getDefaultCursor = useCallback(() => {
-    if (isReplaySelectingStartRef.current) return "crosshair";
+    if (isReplaySelectingForThisChartRef.current) return "crosshair";
     if (hiddenRef.current) return "";
 
     return toolRef.current === "trendline" ||
@@ -884,7 +1000,7 @@ export default function Chart({
         replayStart !== null &&
         (currentData.length === 0 || replayStart < currentData[0].time);
 
-      if (!replayActive || isReplaySelectingStartRef.current || hasNoEarlierData) {
+      if (!replayActive || isReplaySelectingForThisChartRef.current || hasNoEarlierData) {
         return;
       }
 
@@ -1142,22 +1258,70 @@ export default function Chart({
     scheduleOverlayDraw();
   }, [scheduleOverlayDraw]);
 
+  const clearSelectedDrawing = useCallback(() => {
+    selectedDrawingRef.current = null;
+    setSelectedDrawing(null);
+  }, []);
+
+  const applyPreviewDrawingUpdate = useCallback(
+    (selection: DrawingSelection, nextDrawing: Drawing) => {
+      if (onPreviewDrawingRef.current) {
+        onPreviewDrawingRef.current(selection, nextDrawing);
+        return;
+      }
+
+      onUpdateDrawingRef.current?.(selection, nextDrawing);
+    },
+    []
+  );
+
+  const cancelTransientInteraction = useCallback(() => {
+    let cancelled = false;
+
+    const selection = selectedDrawingRef.current;
+    const initialDrawing = dragInitialRef.current;
+    if (isDraggingRef.current && selection && initialDrawing) {
+      applyPreviewDrawingUpdate(selection, initialDrawing);
+      cancelled = true;
+    }
+
+    if (isDraggingRef.current) {
+      resetDragState();
+      suppressClickRef.current = false;
+      cancelled = true;
+    }
+
+    if (drawStartRef.current || drawPreviewRef.current) {
+      drawStartRef.current = null;
+      drawPreviewRef.current = null;
+      setDrawingStep("none");
+      cancelled = true;
+    }
+
+    if (cancelled) {
+      scheduleOverlayDraw();
+    }
+
+    return cancelled;
+  }, [applyPreviewDrawingUpdate, resetDragState, scheduleOverlayDraw]);
+
   useEffect(() => {
     clearDrawing();
     setDrawingStep("none");
   }, [tool, clearDrawing]);
 
   useEffect(() => {
-    if (!isReplaySelectingStart) return;
+    if (!isReplaySelectingForThisChart) return;
 
-    resetDragState();
-    drawStartRef.current = null;
-    drawPreviewRef.current = null;
-    selectedDrawingRef.current = null;
-    setDrawingStep("none");
-    setSelectedDrawing(null);
+    cancelTransientInteraction();
+    clearSelectedDrawing();
     scheduleOverlayDraw();
-  }, [isReplaySelectingStart, resetDragState, scheduleOverlayDraw]);
+  }, [
+    cancelTransientInteraction,
+    clearSelectedDrawing,
+    isReplaySelectingForThisChart,
+    scheduleOverlayDraw,
+  ]);
 
   useEffect(() => {
     if (!hidden) {
@@ -1166,31 +1330,31 @@ export default function Chart({
       return;
     }
 
-    resetDragState();
-    drawStartRef.current = null;
-    drawPreviewRef.current = null;
-    selectedDrawingRef.current = null;
-    setDrawingStep("none");
-    setSelectedDrawing(null);
+    cancelTransientInteraction();
+    clearSelectedDrawing();
     scheduleOverlayDraw();
-  }, [getDefaultCursor, hidden, resetDragState, scheduleOverlayDraw, setContainerCursor]);
+  }, [
+    cancelTransientInteraction,
+    clearSelectedDrawing,
+    getDefaultCursor,
+    hidden,
+    scheduleOverlayDraw,
+    setContainerCursor,
+  ]);
 
   useEffect(() => {
     hasInitialData.current = false;
-    resetDragState();
-    drawStartRef.current = null;
-    drawPreviewRef.current = null;
-    setDrawingStep("none");
-    setSelectedDrawing(null);
+    cancelTransientInteraction();
+    clearSelectedDrawing();
     scheduleOverlayDraw();
-  }, [resetDragState, scheduleOverlayDraw, symbol, timeframe]);
+  }, [cancelTransientInteraction, clearSelectedDrawing, scheduleOverlayDraw, symbol, timeframe]);
 
   useEffect(() => {
     if (activeChart && activeChart !== chartId && selectedDrawingRef.current) {
-      resetDragState();
-      setSelectedDrawing(null);
+      cancelTransientInteraction();
+      clearSelectedDrawing();
     }
-  }, [activeChart, chartId, resetDragState]);
+  }, [activeChart, cancelTransientInteraction, chartId, clearSelectedDrawing]);
 
   useEffect(() => {
     if (!selectedDrawing && isDraggingRef.current) {
@@ -1221,7 +1385,7 @@ export default function Chart({
     if (!isDraggingRef.current) {
       setContainerCursor(getDefaultCursor());
     }
-  }, [getDefaultCursor, isReplaySelectingStart, setContainerCursor, tool]);
+  }, [getDefaultCursor, isReplaySelectingForThisChart, setContainerCursor, tool]);
 
   useEffect(() => {
     if (!chartRef.current) return;
@@ -1284,8 +1448,17 @@ export default function Chart({
     const handleMouseUp = () => {
       if (!isDraggingRef.current) return;
 
-      if (dragMovedRef.current) {
+      const didMove = dragMovedRef.current;
+      const selection = selectedDrawingRef.current;
+      const initialDrawing = dragInitialRef.current;
+      const currentDrawing = getDrawingBySelection(selection);
+
+      if (didMove) {
         suppressClickRef.current = true;
+      }
+
+      if (didMove && selection && initialDrawing && currentDrawing) {
+        onCommitPreviewDrawingRef.current?.(selection, initialDrawing, currentDrawing);
       }
 
       resetDragState();
@@ -1293,11 +1466,10 @@ export default function Chart({
 
     window.addEventListener("mouseup", handleMouseUp);
     return () => window.removeEventListener("mouseup", handleMouseUp);
-  }, [resetDragState]);
+  }, [getDrawingBySelection, resetDragState]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Delete") return;
       if (activeChartRef.current !== chartId) return;
 
       const target = event.target as HTMLElement | null;
@@ -1311,26 +1483,76 @@ export default function Chart({
         return;
       }
 
-      if (drawStartRef.current) {
-        drawStartRef.current = null;
-        drawPreviewRef.current = null;
-        setDrawingStep("none");
+      const metaOrCtrl = event.metaKey || event.ctrlKey;
+      const key = event.key.toLowerCase();
+
+      if (
+        metaOrCtrl &&
+        ((event.shiftKey && key === "z") || key === "y")
+      ) {
+        if (isDraggingRef.current || drawStartRef.current) {
+          if (cancelTransientInteraction()) {
+            event.preventDefault();
+          }
+          return;
+        }
+
+        if (!canRedo) return;
+        event.preventDefault();
+        onRedo?.();
+        return;
+      }
+
+      if (metaOrCtrl && !event.shiftKey && key === "z") {
+        if (isDraggingRef.current || drawStartRef.current) {
+          if (cancelTransientInteraction()) {
+            event.preventDefault();
+          }
+          return;
+        }
+
+        if (!canUndo) return;
+        event.preventDefault();
+        onUndo?.();
+        return;
+      }
+
+      if (event.key === "Escape") {
+        if (cancelTransientInteraction()) {
+          event.preventDefault();
+          return;
+        }
+
+        if (!selectedDrawingRef.current) return;
+
+        clearSelectedDrawing();
         scheduleOverlayDraw();
         event.preventDefault();
         return;
       }
 
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+
       const currentSelection = selectedDrawingRef.current;
       if (!currentSelection) return;
 
       onDeleteDrawingRef.current?.(currentSelection.id);
-      setSelectedDrawing(null);
+      clearSelectedDrawing();
       event.preventDefault();
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [chartId, scheduleOverlayDraw]);
+  }, [
+    cancelTransientInteraction,
+    canRedo,
+    canUndo,
+    chartId,
+    clearSelectedDrawing,
+    onRedo,
+    onUndo,
+    scheduleOverlayDraw,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -1389,7 +1611,7 @@ export default function Chart({
       setActiveChart?.(chartId);
       activeChartRef.current = chartId;
 
-      if (isReplaySelectingStartRef.current) {
+      if (isReplaySelectingForThisChartRef.current) {
         return;
       }
 
@@ -1498,7 +1720,7 @@ export default function Chart({
         const rawPoint = getRawPointFromParam(param);
         const snappedPoint = getSnappedPointFromParam(param);
 
-        if (isReplaySelectingStartRef.current) {
+        if (isReplaySelectingForThisChartRef.current) {
           if (!isDraggingRef.current) {
             setContainerCursor("crosshair");
           }
@@ -1546,13 +1768,13 @@ export default function Chart({
             const dx = rawPoint.time - dragStartPointRef.current.time;
             const dy = rawPoint.price - dragStartPointRef.current.price;
             if (selection.type === "text" && isTextDrawing(initial)) {
-              onUpdateDrawingRef.current?.(selection, {
+              applyPreviewDrawingUpdate(selection, {
                 ...initial,
                 time: (initial.time + dx) as UTCTimestamp,
                 price: initial.price + dy,
               });
             } else if (isPointDrawing(initial)) {
-              onUpdateDrawingRef.current?.(selection, {
+              applyPreviewDrawingUpdate(selection, {
                 ...initial,
                 start: {
                   time: (initial.start.time + dx) as UTCTimestamp,
@@ -1565,7 +1787,7 @@ export default function Chart({
               });
             }
           } else if (dragModeRef.current === "resize-start" && snappedPoint && isPointDrawing(initial)) {
-            onUpdateDrawingRef.current?.(selection, {
+            applyPreviewDrawingUpdate(selection, {
               ...initial,
               start: snappedPoint,
               end: initial.end,
@@ -1579,7 +1801,7 @@ export default function Chart({
             snappedPoint &&
             isPointDrawing(initial)
           ) {
-            onUpdateDrawingRef.current?.(
+            applyPreviewDrawingUpdate(
               selection,
               {
                 ...initial,
@@ -1587,7 +1809,7 @@ export default function Chart({
               }
             );
           } else if (snappedPoint && isPointDrawing(initial)) {
-            onUpdateDrawingRef.current?.(selection, {
+            applyPreviewDrawingUpdate(selection, {
               ...initial,
               start: initial.start,
               end: snappedPoint,
@@ -1640,7 +1862,7 @@ export default function Chart({
         setActiveChart?.(chartId);
         activeChartRef.current = chartId;
 
-        if (isReplaySelectingStartRef.current) {
+        if (isReplaySelectingForThisChartRef.current) {
           const nearestCandle = getNearestCandle(param);
           const rawPoint = getRawPointFromParam(param);
           const timestamp =
@@ -1833,11 +2055,6 @@ export default function Chart({
     if (!seriesRef.current || !chartRef.current) return;
 
     // LIVE DATA LEAK FIX: Prevent inactive charts from updating during independent replay
-    // When sync is OFF and this chart is not active, keep it stable (don't flicker with live updates)
-    if (isReplay && !isReplaySync && activeChart !== chartId) {
-      return;
-    }
-
     try {
       // Priority: use live data if available, otherwise fallback to historical from store
       const candlesFromStore = candleStoreData[symbol]?.[timeframe] ?? [];
@@ -1848,7 +2065,7 @@ export default function Chart({
       // When replay selection is armed, keep the full chart visible so the user can pick any candle.
       const shouldApplyReplay =
         isReplay &&
-        !isReplaySelectingStart &&
+        !isReplaySelectingForThisChart &&
         !hasNoEarlierReplayData &&
         (isReplaySync
           ? replayCursorTime !== null
@@ -1893,7 +2110,22 @@ export default function Chart({
     } catch (error) {
       console.error("[Chart] setData error:", error);
     }
-  }, [data, candleStoreData, symbol, timeframe, isReplay, isReplaySelectingStart, replayStartTime, replayCursorTime, replayIndex, isReplaySync, activeChart, chartId, hasNoEarlierReplayData, scheduleOverlayDraw]);
+  }, [
+    activeChart,
+    candleStoreData,
+    chartId,
+    data,
+    hasNoEarlierReplayData,
+    isReplay,
+    isReplaySelectingForThisChart,
+    isReplaySync,
+    replayCursorTime,
+    replayIndex,
+    replayStartTime,
+    scheduleOverlayDraw,
+    symbol,
+    timeframe,
+  ]);
 
   useEffect(() => {
     scheduleOverlayDraw();
@@ -1914,7 +2146,7 @@ export default function Chart({
         }}
       />
 
-      {isReplay && !isReplaySelectingStart && (
+      {isReplay && replayStartTime !== null && !isReplaySelectingForThisChart && (
         <div
           style={{
             position: "absolute",
@@ -1971,7 +2203,7 @@ export default function Chart({
         </div>
       )}
 
-      {hidden && !isReplaySelectingStart && (
+      {hidden && !isReplaySelectingForThisChart && (
         <div
           style={{
             position: "absolute",
@@ -1991,7 +2223,7 @@ export default function Chart({
         </div>
       )}
 
-      {isReplay && isReplaySelectingStart && (
+      {isReplay && isReplaySelectingForThisChart && (
         <div
           style={{
             position: "absolute",
@@ -2008,9 +2240,15 @@ export default function Chart({
             style={{
               padding: "10px 14px",
               borderRadius: "10px",
-              background: "rgba(19, 21, 26, 0.94)",
-              border: "1px solid var(--panel-border)",
-              color: "var(--panel-text)",
+              background:
+                theme.mode === "light"
+                  ? "rgba(17, 24, 39, 0.88)"
+                  : "rgba(19, 21, 26, 0.94)",
+              border:
+                theme.mode === "light"
+                  ? "1px solid rgba(0, 0, 0, 0.08)"
+                  : "1px solid var(--panel-border)",
+              color: "#ffffff",
               fontSize: "12px",
               fontWeight: 600,
               boxShadow: "0 8px 20px rgba(0,0,0,0.22)",
@@ -2021,7 +2259,7 @@ export default function Chart({
         </div>
       )}
 
-      {isReplay && !isReplaySelectingStart && hasNoEarlierReplayData && (
+      {isReplay && !isReplaySelectingForThisChart && hasNoEarlierReplayData && (
         <div
           style={{
             position: "absolute",
@@ -2062,7 +2300,9 @@ export default function Chart({
         </div>
       )}
 
-      {!isReplaySelectingStart && !hidden && (tool === "trendline" || tool === "rectangle") && (
+      {!isReplaySelectingForThisChart &&
+        !hidden &&
+        (tool === "trendline" || tool === "rectangle") && (
         <div
           style={{
             position: "absolute",
@@ -2090,7 +2330,7 @@ export default function Chart({
         </div>
       )}
 
-      {!isReplaySelectingStart && !hidden && tool === "text" && (
+      {!isReplaySelectingForThisChart && !hidden && tool === "text" && (
         <div
           style={{
             position: "absolute",

@@ -1,6 +1,5 @@
 import type { ChartDrawings } from "./drawings";
-
-export type Timeframe = "15s" | "1m" | "3m";
+import type { Timeframe } from "./marketData";
 
 export type PanelState = {
   id: string;
