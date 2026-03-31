@@ -1,18 +1,48 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use tauri::{AppHandle, Emitter};
 
-static STREAMS_STARTED: AtomicBool = AtomicBool::new(false);
 static SYMBOL_STATES: LazyLock<Mutex<HashMap<String, SymbolState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static LIVE_SUBSCRIPTIONS: LazyLock<Mutex<HashMap<StreamKey, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static SYMBOL_STREAMS: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Copy)]
 struct SymbolState {
     last_price: f64,
     last_time: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StreamKey {
+    symbol: String,
+    timeframe: Timeframe,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ActiveTimeframes {
+    s15: bool,
+    m1: bool,
+    m3: bool,
+}
+
+impl ActiveTimeframes {
+    fn is_empty(self) -> bool {
+        !self.s15 && !self.m1 && !self.m3
+    }
+
+    fn includes(self, timeframe: Timeframe) -> bool {
+        match timeframe {
+            Timeframe::S15 => self.s15,
+            Timeframe::M1 => self.m1,
+            Timeframe::M3 => self.m3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,7 +72,7 @@ struct SupportedSymbol {
     label: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Timeframe {
     S15,
     M1,
@@ -142,6 +172,10 @@ fn supported_symbols() -> Vec<SupportedSymbol> {
             label: "S&P 500".to_string(),
         },
     ]
+}
+
+fn is_supported_symbol(symbol: &str) -> bool {
+    supported_symbols().iter().any(|item| item.id == symbol)
 }
 
 fn base_price_for_symbol(symbol: &str) -> f64 {
@@ -274,6 +308,26 @@ fn emit_candle(
     app.emit(&event_name, payload).map_err(|error| error.to_string())
 }
 
+fn active_timeframes_for_symbol(symbol: &str) -> ActiveTimeframes {
+    let mut active = ActiveTimeframes::default();
+
+    if let Ok(subscriptions) = LIVE_SUBSCRIPTIONS.lock() {
+        for (key, count) in subscriptions.iter() {
+            if *count == 0 || key.symbol != symbol {
+                continue;
+            }
+
+            match key.timeframe {
+                Timeframe::S15 => active.s15 = true,
+                Timeframe::M1 => active.m1 = true,
+                Timeframe::M3 => active.m3 = true,
+            }
+        }
+    }
+
+    active
+}
+
 fn current_candle_snapshot(symbol: &str, timeframe: Timeframe) -> Candle {
     let now = align_timestamp(current_timestamp(), timeframe);
 
@@ -290,12 +344,12 @@ fn current_candle_snapshot(symbol: &str, timeframe: Timeframe) -> Candle {
         })
 }
 
-fn start_symbol_stream(app: AppHandle, symbol: &str) {
-    let symbol = symbol.to_string();
+fn start_symbol_stream(app: AppHandle, symbol: String, should_run: Arc<AtomicBool>) {
+    let stream_symbol = symbol.clone();
 
     thread::spawn(move || {
-        let initial_15s = current_candle_snapshot(&symbol, Timeframe::S15);
-        let initial_price = read_symbol_state(&symbol)
+        let initial_15s = current_candle_snapshot(&stream_symbol, Timeframe::S15);
+        let initial_price = read_symbol_state(&stream_symbol)
             .filter(|state| state.last_time + Timeframe::S15.duration() * 2 >= current_timestamp())
             .map(|state| state.last_price)
             .unwrap_or(initial_15s.close);
@@ -313,41 +367,53 @@ fn start_symbol_stream(app: AppHandle, symbol: &str) {
             ),
             CandleBuilder::from_current(
                 Timeframe::M1,
-                current_candle_snapshot(&symbol, Timeframe::M1),
+                current_candle_snapshot(&stream_symbol, Timeframe::M1),
             ),
             CandleBuilder::from_current(
                 Timeframe::M3,
-                current_candle_snapshot(&symbol, Timeframe::M3),
+                current_candle_snapshot(&stream_symbol, Timeframe::M3),
             ),
         ];
 
-        loop {
+        while should_run.load(Ordering::Relaxed) {
+            let active_timeframes = active_timeframes_for_symbol(&stream_symbol);
+            if active_timeframes.is_empty() {
+                break;
+            }
+
             let now = current_timestamp_millis();
-            price = evolve_live_price(&symbol, now, price);
-            store_symbol_state(&symbol, now / 1_000, price);
+            price = evolve_live_price(&stream_symbol, now, price);
+            store_symbol_state(&stream_symbol, now / 1_000, price);
 
             for builder in &mut builders {
+                let is_active = active_timeframes.includes(builder.timeframe);
+
                 if let Some(closed) = builder.update(price) {
-                    store_symbol_state(&symbol, closed.time, closed.close);
-                    let _ = emit_candle(&app, &symbol, builder.timeframe, &closed);
+                    store_symbol_state(&stream_symbol, closed.time, closed.close);
+                    if is_active {
+                        let _ = emit_candle(&app, &stream_symbol, builder.timeframe, &closed);
+                    }
                 }
 
-                let _ = emit_candle(&app, &symbol, builder.timeframe, &builder.current);
+                if is_active {
+                    let _ = emit_candle(&app, &stream_symbol, builder.timeframe, &builder.current);
+                }
             }
 
             thread::sleep(std::time::Duration::from_millis(100));
         }
+
+        if let Ok(mut symbol_streams) = SYMBOL_STREAMS.lock() {
+            let should_remove = symbol_streams
+                .get(&stream_symbol)
+                .map(|current| Arc::ptr_eq(current, &should_run))
+                .unwrap_or(false);
+
+            if should_remove {
+                symbol_streams.remove(&stream_symbol);
+            }
+        }
     });
-}
-
-fn ensure_streams_started(app: AppHandle) {
-    if STREAMS_STARTED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-
-    for symbol in supported_symbols() {
-        start_symbol_stream(app.clone(), &symbol.id);
-    }
 }
 
 fn generate_synthetic_candle(
@@ -452,6 +518,10 @@ fn get_historical(
         }
     }
 
+    if !is_supported_symbol(&symbol) {
+        return Err(format!("Unsupported symbol: {symbol}"));
+    }
+
     let timeframe = Timeframe::parse(&timeframe)
         .ok_or_else(|| format!("Unsupported timeframe: {timeframe}"))?;
 
@@ -462,19 +532,90 @@ fn get_historical(
 
 #[tauri::command]
 fn subscribe_live(app: AppHandle, symbol: String, timeframe: String) -> Result<(), String> {
-    let symbol_supported = supported_symbols().iter().any(|item| item.id == symbol);
-    if !symbol_supported {
+    if !is_supported_symbol(&symbol) {
         return Err(format!("Unsupported symbol: {symbol}"));
     }
 
-    Timeframe::parse(&timeframe).ok_or_else(|| format!("Unsupported timeframe: {timeframe}"))?;
-    ensure_streams_started(app);
+    let timeframe =
+        Timeframe::parse(&timeframe).ok_or_else(|| format!("Unsupported timeframe: {timeframe}"))?;
+    let key = StreamKey {
+        symbol: symbol.clone(),
+        timeframe,
+    };
+
+    {
+        let mut subscriptions = LIVE_SUBSCRIPTIONS
+            .lock()
+            .map_err(|_| "live subscription registry lock failed".to_string())?;
+        let entry = subscriptions.entry(key).or_insert(0);
+        *entry += 1;
+    }
+
+    let should_start = {
+        let mut symbol_streams = SYMBOL_STREAMS
+            .lock()
+            .map_err(|_| "symbol stream registry lock failed".to_string())?;
+
+        if symbol_streams.contains_key(&symbol) {
+            None
+        } else {
+            let should_run = Arc::new(AtomicBool::new(true));
+            symbol_streams.insert(symbol.clone(), should_run.clone());
+            Some(should_run)
+        }
+    };
+
+    if let Some(should_run) = should_start {
+        start_symbol_stream(app, symbol, should_run);
+    }
+
     Ok(())
 }
 
 #[tauri::command]
 fn unsubscribe_live(symbol: String, timeframe: String) -> Result<(), String> {
-    let _ = (symbol, timeframe);
+    if !is_supported_symbol(&symbol) {
+        return Err(format!("Unsupported symbol: {symbol}"));
+    }
+
+    let timeframe =
+        Timeframe::parse(&timeframe).ok_or_else(|| format!("Unsupported timeframe: {timeframe}"))?;
+    let key = StreamKey {
+        symbol: symbol.clone(),
+        timeframe,
+    };
+
+    let should_stop_symbol = {
+        let mut subscriptions = LIVE_SUBSCRIPTIONS
+            .lock()
+            .map_err(|_| "live subscription registry lock failed".to_string())?;
+
+        match subscriptions.get_mut(&key) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => {
+                subscriptions.remove(&key);
+                !subscriptions.keys().any(|stream_key| stream_key.symbol == symbol)
+            }
+            None => false,
+        }
+    };
+
+    if should_stop_symbol {
+        let should_run = {
+            let mut symbol_streams = SYMBOL_STREAMS
+                .lock()
+                .map_err(|_| "symbol stream registry lock failed".to_string())?;
+            symbol_streams.remove(&symbol)
+        };
+
+        if let Some(should_run) = should_run {
+            should_run.store(false, Ordering::Relaxed);
+        }
+    }
+
     Ok(())
 }
 

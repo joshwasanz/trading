@@ -27,6 +27,12 @@ type Props = {
   jumpTime?: string;
   setJumpTime?: (time: string) => void;
   goToTime?: (targetTime: number) => void;
+  replayHistoryStatus?: "idle" | "loading" | "failed";
+  replayHistoryMessage?: string | null;
+  providerNotice?: {
+    tone: "warning" | "error";
+    message: string;
+  } | null;
   showSessions?: boolean;
   setShowSessions?: (showSessions: boolean) => void;
   jumpToSession?: (session: SessionKey) => void;
@@ -58,6 +64,12 @@ export default function TopBar({
   jumpTime = "",
   setJumpTime,
   goToTime,
+  replayHistoryStatus = "idle",
+  replayHistoryMessage = null,
+  providerNotice = null,
+  showSessions = false,
+  setShowSessions,
+  jumpToSession,
   canUndo = false,
   canRedo = false,
   onUndo,
@@ -71,6 +83,30 @@ export default function TopBar({
   const replayTimeLabel = replayReady
     ? formatReplayTime(replayCursorTime)
     : "Pick a candle to start";
+  const replayHistoryTone =
+    replayHistoryStatus === "failed"
+      ? {
+          background: "rgba(220, 38, 38, 0.12)",
+          border: "1px solid rgba(220, 38, 38, 0.28)",
+          color: "#ef4444",
+        }
+      : {
+          background: "rgba(59, 130, 246, 0.10)",
+          border: "1px solid rgba(59, 130, 246, 0.24)",
+          color: "var(--panel-text)",
+        };
+  const providerNoticeTone =
+    providerNotice?.tone === "error"
+      ? {
+          background: "rgba(220, 38, 38, 0.12)",
+          border: "1px solid rgba(220, 38, 38, 0.28)",
+          color: "#ef4444",
+        }
+      : {
+          background: "rgba(245, 158, 11, 0.10)",
+          border: "1px solid rgba(245, 158, 11, 0.24)",
+          color: "var(--panel-text)",
+        };
 
   return (
     <div className="top-bar">
@@ -104,7 +140,6 @@ export default function TopBar({
               layoutType,
               panels,
               drawingsBySymbol,
-              theme: { mode, preset },
             };
 
             saveWorkspace(ws);
@@ -339,6 +374,81 @@ export default function TopBar({
               <span style={{ fontSize: "12px", color: "var(--panel-muted)" }}>
                 {isReplaySelectingStart ? "Select start candle..." : `Current: ${replayTimeLabel}`}
               </span>
+
+              {replayHistoryStatus !== "idle" && replayHistoryMessage && (
+                <span
+                  style={{
+                    ...replayHistoryTone,
+                    fontSize: "11px",
+                    padding: "4px 8px",
+                    borderRadius: "999px",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {replayHistoryMessage}
+                </span>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {providerNotice && (
+        <div style={{ display: "flex", alignItems: "center", marginLeft: "12px" }}>
+          <span
+            style={{
+              ...providerNoticeTone,
+              fontSize: "11px",
+              padding: "4px 8px",
+              borderRadius: "999px",
+              whiteSpace: "nowrap",
+            }}
+            title={providerNotice.message}
+          >
+            {providerNotice.message}
+          </span>
+        </div>
+      )}
+
+      {(setShowSessions || jumpToSession) && (
+        <div style={{ display: "flex", gap: "4px", alignItems: "center", marginLeft: "12px" }}>
+          <button
+            onClick={() => setShowSessions?.(!showSessions)}
+            className={`ui-button ${showSessions ? "ui-button--active" : ""}`}
+            style={{ height: "28px", padding: "0 12px", fontSize: "12px" }}
+            title={showSessions ? "Hide session overlays" : "Show session overlays"}
+          >
+            Sessions
+          </button>
+
+          {showSessions && (
+            <>
+              <button
+                onClick={() => jumpToSession?.("asia")}
+                className="ui-button"
+                style={{ height: "28px", padding: "0 10px", fontSize: "12px" }}
+                title="Jump to Asia session start"
+              >
+                Asia
+              </button>
+
+              <button
+                onClick={() => jumpToSession?.("london")}
+                className="ui-button"
+                style={{ height: "28px", padding: "0 10px", fontSize: "12px" }}
+                title="Jump to London session start"
+              >
+                London
+              </button>
+
+              <button
+                onClick={() => jumpToSession?.("newyork")}
+                className="ui-button"
+                style={{ height: "28px", padding: "0 10px", fontSize: "12px" }}
+                title="Jump to New York session start"
+              >
+                New York
+              </button>
             </>
           )}
         </div>

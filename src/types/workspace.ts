@@ -17,9 +17,4 @@ export type Workspace = {
   panels: PanelState[];
 
   drawingsBySymbol: Record<string, ChartDrawings>;
-
-  theme: {
-    mode: "dark" | "light";
-    preset: "professional" | "premium" | "vibrant" | "monochrome" | "gold" | "ict";
-  };
 };

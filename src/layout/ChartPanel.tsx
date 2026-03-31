@@ -1,5 +1,5 @@
 import Chart from "../Chart";
-import type { Candle, Timeframe } from "../types/marketData";
+import type { Candle, SupportedSymbol, Timeframe } from "../types/marketData";
 import type { ReplayStartPayload } from "../types/replay";
 import type {
   ChartDrawings,
@@ -38,6 +38,7 @@ type Props = {
     nextDrawing: Drawing
   ) => void;
   onFocus: () => void;
+  supportedSymbols?: SupportedSymbol[];
   onSymbolChange?: (symbol: string) => void;
   onTimeframeChange?: (tf: Timeframe) => void;
   activeChart?: string | null;
@@ -77,6 +78,7 @@ export default function ChartPanel({
   onPreviewDrawing,
   onCommitPreviewDrawing,
   onFocus,
+  supportedSymbols = [],
   onSymbolChange,
   onTimeframeChange,
   activeChart,
@@ -98,8 +100,12 @@ export default function ChartPanel({
   canRedo,
   onUndo,
   onRedo,
+  showSessions = false,
 }: Props) {
   const chartId = panelId;
+  const symbolOptions = supportedSymbols.some((candidate) => candidate.id === symbol)
+    ? supportedSymbols
+    : [{ id: symbol, label: symbol.toUpperCase() }, ...supportedSymbols];
   const hasDrawings =
     drawings.trendlines.length > 0 ||
     drawings.rectangles.length > 0 ||
@@ -110,14 +116,15 @@ export default function ChartPanel({
       <div className="chart-panel__drag-handle">
         {/* Symbol Selector */}
         <div style={{ display: "flex", gap: "2px" }}>
-          {["nq", "es"].map((sym) => (
+          {symbolOptions.map((supportedSymbol) => (
             <button
-              key={sym}
-              onClick={() => onSymbolChange?.(sym)}
-              className={`ui-button ${symbol === sym ? "ui-button--active" : ""}`}
+              key={supportedSymbol.id}
+              onClick={() => onSymbolChange?.(supportedSymbol.id)}
+              className={`ui-button ${symbol === supportedSymbol.id ? "ui-button--active" : ""}`}
               style={{ height: "24px", padding: "0 8px", fontSize: "11px" }}
+              title={supportedSymbol.label}
             >
-              {sym.toUpperCase()}
+              {supportedSymbol.id.toUpperCase()}
             </button>
           ))}
         </div>
@@ -236,6 +243,7 @@ export default function ChartPanel({
           canRedo={canRedo}
           onUndo={onUndo}
           onRedo={onRedo}
+          showSessions={showSessions}
         />
       </div>
     </div>

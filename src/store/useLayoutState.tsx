@@ -10,15 +10,19 @@ type Panel = {
 type State = {
   panels: Panel[];
   drawingsBySymbol: DrawingsState;
+  focusedPanelId: string | null;
 
   setPanels: (panels: Panel[]) => void;
   setDrawingsBySymbol: (drawings: DrawingsState) => void;
+  setFocusedPanelId: (focusedPanelId: string | null) => void;
 };
 
 export const useLayoutState = create<State>((set) => ({
   panels: [],
   drawingsBySymbol: {},
+  focusedPanelId: null,
 
   setPanels: (panels) => set({ panels }),
   setDrawingsBySymbol: (drawingsBySymbol) => set({ drawingsBySymbol }),
+  setFocusedPanelId: (focusedPanelId) => set({ focusedPanelId }),
 }));

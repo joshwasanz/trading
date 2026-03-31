@@ -16,6 +16,7 @@ import { useCandleStore } from "./store/useCandleStore";
 import DrawingStylePanel from "./components/DrawingStylePanel";
 import type { Candle } from "./types/marketData";
 import type { ReplayStartPayload } from "./types/replay";
+import { SESSION_CONFIG, getSessionRange, type SessionKey } from "./types/sessions";
 import { formatReplayTime } from "./utils/replayDisplay";
 import {
   DEFAULT_TRENDLINE_EXTENSION,
@@ -102,6 +103,7 @@ type Props = {
   canRedo?: boolean;
   onUndo?: () => void;
   onRedo?: () => void;
+  showSessions?: boolean;
 };
 
 type ScreenPoint = {
@@ -126,6 +128,7 @@ type DragTarget = {
 const TEXT_FONT_SIZE = 12;
 const TEXT_PADDING_X = 4;
 const TEXT_PADDING_Y = 3;
+const SESSION_KEYS: SessionKey[] = ["asia", "london", "newyork"];
 
 function getLineBoundaryIntersections(
   start: ScreenPoint,
@@ -388,6 +391,47 @@ function drawReplayVerticalMarker(
   ctx.restore();
 }
 
+function toChartCandle(candle: Candle): CandlestickData<Time> {
+  return {
+    ...candle,
+    time: candle.time as UTCTimestamp,
+  } as CandlestickData<Time>;
+}
+
+function getIncrementalLiveCandle(previous: Candle[], next: Candle[]): Candle | null {
+  if (previous.length === 0 || next.length === 0) {
+    return null;
+  }
+
+  if (next.length === previous.length) {
+    if (previous[0]?.time !== next[0]?.time) {
+      return null;
+    }
+
+    for (let index = 0; index < next.length - 1; index += 1) {
+      if (previous[index] !== next[index]) {
+        return null;
+      }
+    }
+
+    return previous[previous.length - 1] === next[next.length - 1]
+      ? null
+      : next[next.length - 1] ?? null;
+  }
+
+  if (next.length === previous.length + 1) {
+    for (let index = 0; index < previous.length; index += 1) {
+      if (previous[index] !== next[index]) {
+        return null;
+      }
+    }
+
+    return next[next.length - 1] ?? null;
+  }
+
+  return null;
+}
+
 export default function Chart({
   data,
   activeChart,
@@ -418,6 +462,7 @@ export default function Chart({
   canRedo = false,
   onUndo,
   onRedo,
+  showSessions = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -446,8 +491,10 @@ export default function Chart({
   const isReplaySelectingForThisChartRef = useRef(isReplaySelectingForThisChart);
   const replayStartTimeRef = useRef(replayStartTime);
   const replayCursorTimeRef = useRef(replayCursorTime);
+  const showSessionsRef = useRef(showSessions);
   const candleStoreDataRef = useRef<Record<string, Record<string, Candle[]>>>({});
   const dataRef = useRef(data);
+  const displayedDataRef = useRef<Candle[]>(data);
   const drawingsRef = useRef(drawings);
   const selectedDrawingRef = useRef<DrawingSelection | null>(null);
   const onAddTrendlineRef = useRef(onAddTrendline);
@@ -514,6 +561,10 @@ export default function Chart({
   useEffect(() => {
     replayCursorTimeRef.current = replayCursorTime;
   }, [replayCursorTime]);
+
+  useEffect(() => {
+    showSessionsRef.current = showSessions;
+  }, [showSessions]);
 
   useEffect(() => {
     dataRef.current = data;
@@ -1047,6 +1098,122 @@ export default function Chart({
     [chartId]
   );
 
+  const drawSessionOverlay = useCallback(
+    (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, dpr: number) => {
+      if (!showSessionsRef.current) {
+        return;
+      }
+
+      const chart = chartRef.current;
+      if (!chart) {
+        return;
+      }
+
+      const visibleCandles = displayedDataRef.current;
+      if (visibleCandles.length === 0) {
+        return;
+      }
+
+      const logicalRange = chart.timeScale().getVisibleLogicalRange();
+      if (!logicalRange) {
+        return;
+      }
+
+      const visibleFrom =
+        resolveTimeFromLogicalIndex(logicalRange.from, visibleCandles, timeframeRef.current) ??
+        (visibleCandles[0]?.time as UTCTimestamp | undefined);
+      const visibleTo =
+        resolveTimeFromLogicalIndex(logicalRange.to, visibleCandles, timeframeRef.current) ??
+        (visibleCandles[visibleCandles.length - 1]?.time as UTCTimestamp | undefined);
+
+      if (typeof visibleFrom !== "number" || typeof visibleTo !== "number") {
+        return;
+      }
+
+      const rangeStart = Math.min(visibleFrom, visibleTo);
+      const rangeEnd = Math.max(visibleFrom, visibleTo);
+      const viewportWidth = canvas.width / dpr;
+      const computedStyle = getComputedStyle(document.documentElement);
+      const panelTextColor = computedStyle.getPropertyValue("--panel-text").trim() || "#e5e7eb";
+      const panelBackground = computedStyle.getPropertyValue("--panel-bg").trim() || "#0f172a";
+
+      const startDate = new Date(rangeStart * 1000);
+      startDate.setUTCHours(0, 0, 0, 0);
+      const endDate = new Date(rangeEnd * 1000);
+      endDate.setUTCHours(0, 0, 0, 0);
+
+      for (
+        const day = new Date(startDate);
+        day.getTime() <= endDate.getTime();
+        day.setUTCDate(day.getUTCDate() + 1)
+      ) {
+        for (const session of SESSION_KEYS) {
+          const config = SESSION_CONFIG[session];
+          const sessionRange = getSessionRange(day, session);
+
+          if (sessionRange.end <= rangeStart || sessionRange.start >= rangeEnd) {
+            continue;
+          }
+
+          const startCoordinate = chart.timeScale().timeToCoordinate(
+            sessionRange.start as UTCTimestamp
+          );
+          const endCoordinate = chart.timeScale().timeToCoordinate(
+            sessionRange.end as UTCTimestamp
+          );
+          const startX =
+            startCoordinate === null
+              ? sessionRange.start < rangeStart
+                ? 0
+                : viewportWidth
+              : (startCoordinate as unknown as number);
+          const endX =
+            endCoordinate === null
+              ? sessionRange.end > rangeEnd
+                ? viewportWidth
+                : 0
+              : (endCoordinate as unknown as number);
+
+          const left = Math.max(0, Math.min(startX, endX));
+          const right = Math.min(viewportWidth, Math.max(startX, endX));
+          const width = right - left;
+
+          if (width <= 1) {
+            continue;
+          }
+
+          ctx.save();
+          ctx.fillStyle = config.color;
+          ctx.fillRect(left * dpr, 0, width * dpr, canvas.height);
+
+          if (width >= 48) {
+            const labelPaddingX = 6 * dpr;
+            ctx.font = `${10 * dpr}px sans-serif`;
+            const labelWidth = ctx.measureText(config.label).width + labelPaddingX * 2;
+            const maxLabelWidth = width * dpr - 8 * dpr;
+
+            if (maxLabelWidth > labelWidth) {
+              ctx.globalAlpha = 0.82;
+              ctx.fillStyle = panelBackground;
+              ctx.fillRect(left * dpr + 4 * dpr, 6 * dpr, labelWidth, 18 * dpr);
+              ctx.globalAlpha = 1;
+              ctx.fillStyle = panelTextColor;
+              ctx.textBaseline = "middle";
+              ctx.fillText(
+                config.label,
+                left * dpr + 4 * dpr + labelPaddingX,
+                15 * dpr
+              );
+            }
+          }
+
+          ctx.restore();
+        }
+      }
+    },
+    []
+  );
+
   const drawOverlay = useCallback(() => {
     const canvas = overlayRef.current;
     if (!canvas || !chartReadyRef.current) return;
@@ -1056,6 +1223,8 @@ export default function Chart({
 
     const dpr = window.devicePixelRatio || 1;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    drawSessionOverlay(ctx, canvas, dpr);
 
     if (hiddenRef.current) {
       drawReplayOverlay(ctx, canvas, dpr);
@@ -1218,7 +1387,7 @@ export default function Chart({
     ctx.restore();
 
     drawReplayOverlay(ctx, canvas, dpr);
-  }, [drawReplayOverlay, pointToScreen]);
+  }, [drawReplayOverlay, drawSessionOverlay, pointToScreen]);
 
   const scheduleOverlayDraw = useCallback(() => {
     if (overlayFrameRef.current !== null) return;
@@ -2081,13 +2250,19 @@ export default function Chart({
         }
       }
 
-      const nextData = displayData.map((candle) => ({
-        ...candle,
-        time: candle.time as UTCTimestamp,
-      })) as CandlestickData<Time>[];
-      seriesRef.current.setData(nextData);
+      const incrementalLiveCandle = shouldApplyReplay
+        ? null
+        : getIncrementalLiveCandle(displayedDataRef.current, displayData);
 
-      if (!hasInitialData.current && nextData.length > 0) {
+      displayedDataRef.current = displayData;
+
+      if (incrementalLiveCandle) {
+        seriesRef.current.update(toChartCandle(incrementalLiveCandle));
+      } else {
+        seriesRef.current.setData(displayData.map(toChartCandle));
+      }
+
+      if (!hasInitialData.current && displayData.length > 0) {
         if (chartReadyRef.current) {
           hasInitialData.current = true;
           if (dataFitFrameRef.current !== null) {
@@ -2130,6 +2305,10 @@ export default function Chart({
   useEffect(() => {
     scheduleOverlayDraw();
   }, [drawings, scheduleOverlayDraw]);
+
+  useEffect(() => {
+    scheduleOverlayDraw();
+  }, [scheduleOverlayDraw, showSessions]);
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>

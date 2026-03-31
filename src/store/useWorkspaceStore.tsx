@@ -3,6 +3,10 @@ import type { Workspace } from "../types/workspace";
 
 const STORAGE_KEY = "trading_workspaces_v1";
 
+type WorkspaceRecord = Workspace & {
+  theme?: unknown;
+};
+
 type State = {
   workspaces: Workspace[];
   activeWorkspaceId: string | null;
@@ -21,13 +25,28 @@ function loadWorkspacesFromStorage(): Workspace[] {
   try {
     const stored = window.localStorage.getItem(STORAGE_KEY);
     if (stored) {
-      return JSON.parse(stored);
+      const parsed = JSON.parse(stored);
+      return Array.isArray(parsed)
+        ? parsed.map((workspace) => sanitizeWorkspace(workspace as WorkspaceRecord))
+        : [];
     }
   } catch (error) {
     console.error("[WorkspaceStore] Failed to load workspaces:", error);
   }
 
   return [];
+}
+
+function sanitizeWorkspace(workspace: WorkspaceRecord): Workspace {
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    createdAt: workspace.createdAt,
+    updatedAt: workspace.updatedAt,
+    layoutType: workspace.layoutType,
+    panels: workspace.panels,
+    drawingsBySymbol: workspace.drawingsBySymbol,
+  };
 }
 
 export const useWorkspaceStore = create<State>((set) => ({
@@ -42,10 +61,11 @@ export const useWorkspaceStore = create<State>((set) => ({
     set((state) => {
       const existing = state.workspaces;
       const index = existing.findIndex((w) => w.id === ws.id);
+      const sanitizedWorkspace = sanitizeWorkspace(ws as WorkspaceRecord);
 
       const updated = index >= 0
-        ? existing.map((w, i) => i === index ? ws : w)
-        : [...existing, ws];
+        ? existing.map((w, i) => i === index ? sanitizedWorkspace : w)
+        : [...existing, sanitizedWorkspace];
 
       // Persist to localStorage
       try {
@@ -96,7 +116,13 @@ export const useWorkspaceStore = create<State>((set) => ({
   updateWorkspace: (id, updates) => {
     set((state) => {
       const updated = state.workspaces.map((w) =>
-        w.id === id ? { ...w, ...updates, updatedAt: Date.now() } : w
+        w.id === id
+          ? sanitizeWorkspace({
+              ...w,
+              ...updates,
+              updatedAt: Date.now(),
+            } as WorkspaceRecord)
+          : w
       );
 
       // Persist to localStorage
@@ -114,7 +140,8 @@ export const useWorkspaceStore = create<State>((set) => ({
     set((state) => {
       if (state.workspaces.length > 0) return state;
 
-      const updated = [defaultWs];
+      const sanitizedWorkspace = sanitizeWorkspace(defaultWs as WorkspaceRecord);
+      const updated = [sanitizedWorkspace];
 
       // Persist to localStorage
       try {
@@ -125,7 +152,7 @@ export const useWorkspaceStore = create<State>((set) => ({
 
       return {
         workspaces: updated,
-        activeWorkspaceId: defaultWs.id,
+        activeWorkspaceId: sanitizedWorkspace.id,
       };
     });
   },

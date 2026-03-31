@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import ChartPanel from "./ChartPanel";
-import { useThemeStore } from "../store/useThemeStore";
 import { useWorkspaceStore } from "../store/useWorkspaceStore";
 import { useLayoutState } from "../store/useLayoutState";
-import type { Timeframe } from "../types/marketData";
+import type { SupportedSymbol, Timeframe } from "../types/marketData";
 import {
   DEFAULT_TRENDLINE_EXTENSION,
   EMPTY_CHART_DRAWINGS,
@@ -356,6 +355,7 @@ export default function LayoutManager({
   replayIndex,
   isReplaySync,
   onReplayStart,
+  supportedSymbols,
   showSessions,
   registerHistoryControls,
 }: any) {
@@ -368,9 +368,12 @@ export default function LayoutManager({
   const [undoStack, setUndoStack] = useState<DrawingsState[]>([]);
   const [redoStack, setRedoStack] = useState<DrawingsState[]>([]);
 
-  const { setMode, setPreset } = useThemeStore();
   const { workspaces, activeWorkspaceId, updateWorkspace } = useWorkspaceStore();
-  const { setPanels: setLayoutPanels, setDrawingsBySymbol: setLayoutDrawings } = useLayoutState();
+  const {
+    setPanels: setLayoutPanels,
+    setDrawingsBySymbol: setLayoutDrawings,
+    setFocusedPanelId,
+  } = useLayoutState();
 
   useEffect(() => {
     try {
@@ -389,6 +392,16 @@ export default function LayoutManager({
     setLayoutDrawings(drawingsBySymbol);
   }, [drawingsBySymbol, setLayoutDrawings]);
 
+  useEffect(() => {
+    setFocusedPanelId(focused);
+  }, [focused, setFocusedPanelId]);
+
+  useEffect(() => {
+    return () => {
+      setFocusedPanelId(null);
+    };
+  }, [setFocusedPanelId]);
+
   // Load workspace when activeWorkspaceId changes
   useEffect(() => {
     if (!activeWorkspaceId) return;
@@ -401,10 +414,8 @@ export default function LayoutManager({
     setDrawingsBySymbol(normalizeDrawingsState(workspace.drawingsBySymbol));
     setUndoStack([]);
     setRedoStack([]);
-    setMode(workspace.theme.mode);
-    setPreset(workspace.theme.preset);
     // layoutType is controlled by parent, so we don't modify it here
-  }, [activeWorkspaceId, workspaces, setMode, setPreset]);
+  }, [activeWorkspaceId, workspaces]);
 
   // Auto-save workspace changes (debounced 1000ms)
   useEffect(() => {
@@ -682,6 +693,7 @@ export default function LayoutManager({
       onShowDrawings={() => showDrawings(panel.symbol)}
       onClearDrawings={() => clearDrawings(panel.symbol)}
       onFocus={onFocus}
+      supportedSymbols={supportedSymbols as SupportedSymbol[] | undefined}
       onSymbolChange={(symbol) => updatePanel(panel.id, { symbol })}
       onTimeframeChange={(timeframe) => updatePanel(panel.id, { timeframe })}
       isReplay={isReplay}
