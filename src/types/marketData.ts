@@ -21,3 +21,13 @@ export type HistoricalRequest = {
   to?: number;
   limit?: number;
 };
+
+export type HistoryUiStatus = "idle" | "loading" | "empty" | "failed";
+
+export type HistoryUiSource = "initial" | "replay" | "jump" | "context-sync";
+
+export type HistoryUiState = {
+  status: HistoryUiStatus;
+  message: string | null;
+  source?: HistoryUiSource;
+};

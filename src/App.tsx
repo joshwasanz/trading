@@ -10,7 +10,14 @@ import { useCandleStore } from "./store/useCandleStore";
 import { useLayoutState } from "./store/useLayoutState";
 import { EMPTY_CHART_DRAWINGS } from "./types/drawings";
 import { marketDataProvider } from "./data/providers";
-import type { Candle, HistoricalRequest, SupportedSymbol, Timeframe } from "./types/marketData";
+import type {
+  Candle,
+  HistoricalRequest,
+  HistoryUiSource,
+  HistoryUiState,
+  SupportedSymbol,
+  Timeframe,
+} from "./types/marketData";
 import type { ReplayStartPayload } from "./types/replay";
 import { getSessionRange, type SessionKey } from "./types/sessions";
 import {
@@ -197,6 +204,7 @@ type ReplayHistoryResolution = {
   resolved: ResolvedReplayPosition | null;
   didBackfill: boolean;
   contextChanged: boolean;
+  failed: boolean;
 };
 
 type ProviderNotice = {
@@ -227,6 +235,13 @@ function createLoadedRangesState(symbolIds: string[]): LoadedRangesState {
 
 function createPanelContextKey(panel: Panel): string {
   return `${panel.id}:${panel.symbol}:${panel.timeframe}`;
+}
+
+function createIdleHistoryUiState(): HistoryUiState {
+  return {
+    status: "idle",
+    message: null,
+  };
 }
 
 function timeframeSeconds(timeframe: Timeframe): number {
@@ -413,6 +428,8 @@ function AppInner() {
   const [providerNotice, setProviderNotice] = useState<ProviderNotice | null>(null);
   const [supportedSymbols, setSupportedSymbols] =
     useState<SupportedSymbol[]>(DEFAULT_SUPPORTED_SYMBOLS);
+  const [historyUiStates, setHistoryUiStates] =
+    useState<Record<MarketContextKey, HistoryUiState>>({});
 
   const tool = useToolStore((state) => state.tool);
   const magnet = useToolStore((state) => state.magnet);
@@ -509,6 +526,51 @@ function AppInner() {
     []
   );
 
+  const setContextHistoryUiState = useCallback(
+    (
+      symbol: string,
+      timeframe: Timeframe,
+      status: HistoryUiState["status"],
+      message: string | null,
+      source?: HistoryUiSource
+    ) => {
+      const key = makeMarketContextKey(symbol, timeframe);
+
+      setHistoryUiStates((current) => {
+        const nextState =
+          status === "idle"
+            ? createIdleHistoryUiState()
+            : {
+                status,
+                message,
+                source,
+              };
+        const existing = current[key];
+
+        if (
+          existing?.status === nextState.status &&
+          existing?.message === nextState.message &&
+          existing?.source === nextState.source
+        ) {
+          return current;
+        }
+
+        return {
+          ...current,
+          [key]: nextState,
+        };
+      });
+    },
+    []
+  );
+
+  const clearContextHistoryUiState = useCallback(
+    (symbol: string, timeframe: Timeframe) => {
+      setContextHistoryUiState(symbol, timeframe, "idle", null);
+    },
+    [setContextHistoryUiState]
+  );
+
   const clearReplayHistoryFeedback = useCallback(() => {
     setReplayHistoryStatus("idle");
     setReplayHistoryMessage(null);
@@ -599,7 +661,7 @@ function AppInner() {
   const loadOlderHistory = useCallback(
     async (symbol: string, timeframe: Timeframe, currentOldest: number | null) => {
       if (currentOldest === null) {
-        return [];
+        return { candles: [], failed: false };
       }
 
       const step = timeframeSeconds(timeframe);
@@ -607,7 +669,7 @@ function AppInner() {
       const to = currentOldest - step;
 
       if (to <= 0) {
-        return [];
+        return { candles: [], failed: false };
       }
 
       const from = to - (limit - 1) * step;
@@ -625,10 +687,10 @@ function AppInner() {
           applyHistoricalCandles(symbol, timeframe, candles);
         }
 
-        return candles;
+        return { candles, failed: false };
       } catch (error) {
         console.error(`[App] Failed to backfill ${symbol}/${timeframe}:`, error);
-        return [];
+        return { candles: [], failed: true };
       }
     },
     [applyHistoricalCandles, fetchHistoricalDeduped]
@@ -642,6 +704,7 @@ function AppInner() {
           resolved: null,
           didBackfill: false,
           contextChanged: false,
+          failed: false,
         };
       }
 
@@ -658,6 +721,7 @@ function AppInner() {
             resolved: null,
             didBackfill,
             contextChanged: false,
+            failed: false,
           };
         }
 
@@ -666,6 +730,7 @@ function AppInner() {
             resolved: null,
             didBackfill,
             contextChanged: true,
+            failed: false,
           };
         }
 
@@ -678,14 +743,23 @@ function AppInner() {
           break;
         }
 
-        const olderCandles = await loadOlderHistory(
+        const olderHistory = await loadOlderHistory(
           panelState.panel.symbol,
           panelState.panel.timeframe,
           oldestLoaded
         );
         didBackfill = true;
 
-        if (olderCandles.length === 0) {
+        if (olderHistory.failed) {
+          return {
+            resolved: null,
+            didBackfill,
+            contextChanged: false,
+            failed: true,
+          };
+        }
+
+        if (olderHistory.candles.length === 0) {
           break;
         }
 
@@ -698,6 +772,7 @@ function AppInner() {
           resolved: null,
           didBackfill,
           contextChanged: false,
+          failed: false,
         };
       }
 
@@ -706,6 +781,7 @@ function AppInner() {
           resolved: null,
           didBackfill,
           contextChanged: true,
+          failed: false,
         };
       }
 
@@ -719,6 +795,7 @@ function AppInner() {
           resolved: null,
           didBackfill,
           contextChanged: false,
+          failed: false,
         };
       }
 
@@ -726,6 +803,7 @@ function AppInner() {
         resolved: resolveReplayPosition(panelId, targetTimestamp),
         didBackfill,
         contextChanged: false,
+        failed: false,
       };
     },
     [getReplayPanelState, getRetainedLoadedRange, loadOlderHistory, resolveReplayPosition]
@@ -738,6 +816,19 @@ function AppInner() {
         return null;
       }
 
+      const historySource: HistoryUiSource = source === "start" ? "replay" : "jump";
+      const loadingMessage =
+        source === "start"
+          ? "Loading older history for the replay start..."
+          : "Loading older history for the jump target...";
+      const emptyMessage =
+        source === "start"
+          ? "No earlier history is available for that replay start."
+          : "No earlier history is available for that jump target.";
+      const failedMessage =
+        source === "start"
+          ? "Could not load older history for that replay start."
+          : "Could not load older history for that jump target.";
       const panelContext = createPanelContextKey(panelState.panel);
       const oldestLoaded =
         getRetainedLoadedRange(panelState.panel.symbol, panelState.panel.timeframe).oldest ??
@@ -749,13 +840,17 @@ function AppInner() {
       replayHistoryRequestIdRef.current = requestId;
 
       if (needsBackfill) {
-        setReplayHistoryStatus("loading");
-        setReplayHistoryMessage(
-          source === "start"
-            ? "Loading older history for replay start..."
-            : "Loading older history for jump target..."
+        setContextHistoryUiState(
+          panelState.panel.symbol,
+          panelState.panel.timeframe,
+          "loading",
+          loadingMessage,
+          historySource
         );
+        setReplayHistoryStatus("loading");
+        setReplayHistoryMessage(loadingMessage);
       } else {
+        clearContextHistoryUiState(panelState.panel.symbol, panelState.panel.timeframe);
         clearReplayHistoryFeedback();
       }
 
@@ -771,29 +866,54 @@ function AppInner() {
         !currentPanelState ||
         createPanelContextKey(currentPanelState.panel) !== panelContext
       ) {
+        clearContextHistoryUiState(panelState.panel.symbol, panelState.panel.timeframe);
         clearReplayHistoryFeedback();
         return null;
       }
 
       if (!result.resolved) {
         if (needsBackfill || result.didBackfill) {
-          setReplayHistoryStatus("failed");
-          setReplayHistoryMessage(
-            source === "start"
-              ? "Could not load enough older history for that replay start."
-              : "Could not load enough older history for that jump target."
-          );
+          if (result.failed) {
+            setContextHistoryUiState(
+              currentPanelState.panel.symbol,
+              currentPanelState.panel.timeframe,
+              "failed",
+              failedMessage,
+              historySource
+            );
+            setReplayHistoryStatus("failed");
+            setReplayHistoryMessage(failedMessage);
+          } else {
+            setContextHistoryUiState(
+              currentPanelState.panel.symbol,
+              currentPanelState.panel.timeframe,
+              "empty",
+              emptyMessage,
+              historySource
+            );
+            setReplayHistoryStatus("failed");
+            setReplayHistoryMessage(emptyMessage);
+          }
         } else {
+          clearContextHistoryUiState(currentPanelState.panel.symbol, currentPanelState.panel.timeframe);
           clearReplayHistoryFeedback();
         }
 
         return null;
       }
 
+      clearContextHistoryUiState(currentPanelState.panel.symbol, currentPanelState.panel.timeframe);
       clearReplayHistoryFeedback();
       return result.resolved;
     },
-    [clearReplayHistoryFeedback, ensureHistoryForTimestamp, getReplayPanelState, getRetainedLoadedRange]
+    [
+      clearContextHistoryUiState,
+      clearReplayHistoryFeedback,
+      ensureHistoryForTimestamp,
+      getReplayPanelState,
+      getRetainedLoadedRange,
+      setContextHistoryUiState,
+    ]
   );
 
   const moveReplayCursor = useCallback(
@@ -982,6 +1102,139 @@ function AppInner() {
     }
   }, [activeChart, getReplayPanelState, isReplay, isReplaySync, replayCursorTime, replayIndex]);
 
+  useEffect(() => {
+    if (!isReplay || isReplaySelectingStart || replayCursorTime === null || !activeChart) return;
+
+    const panelState = getReplayPanelState(activeChart);
+    if (!panelState || panelState.candles.length === 0) return;
+
+    const resolvedIndex = findCandleIndexAtOrBefore(panelState.candles, replayCursorTime);
+    if (resolvedIndex !== replayIndex) {
+      setReplayIndex(resolvedIndex);
+    }
+  }, [
+    activeChart,
+    getReplayPanelState,
+    isReplay,
+    isReplaySelectingStart,
+    replayCursorTime,
+    replayIndex,
+  ]);
+
+  useEffect(() => {
+    if (!isReplay || isReplaySelectingStart || replayStartTime === null) return;
+
+    const replayStart = replayStartTime;
+    const targetPanels = isReplaySync
+      ? visiblePanels
+      : layoutPanels.filter((panel) => panel.id === (activeChart ?? visiblePanels[0]?.id));
+
+    if (targetPanels.length === 0) return;
+
+    let cancelled = false;
+
+    async function hydrateReplayContexts() {
+      for (const panel of targetPanels) {
+        const panelState = getReplayPanelState(panel.id);
+        if (!panelState) {
+          continue;
+        }
+
+        const oldestLoaded =
+          getRetainedLoadedRange(panel.symbol, panel.timeframe).oldest ??
+          panelState.candles[0]?.time ??
+          null;
+
+        if (oldestLoaded === null || replayStart >= oldestLoaded) {
+          if (!isReplaySync && panel.id === activeChart && replayCursorTime !== null) {
+            const resolvedCursor = resolveReplayPosition(panel.id, replayCursorTime);
+            if (resolvedCursor && resolvedCursor.index !== replayIndex) {
+              setReplayIndex(resolvedCursor.index);
+            }
+          }
+          continue;
+        }
+
+        setContextHistoryUiState(
+          panel.symbol,
+          panel.timeframe,
+          "loading",
+          isReplaySync
+            ? "Loading history for this synced panel..."
+            : "Loading history for this replay context...",
+          "context-sync"
+        );
+
+        const result = await ensureHistoryForTimestamp(panel.id, replayStart);
+        if (cancelled) {
+          return;
+        }
+
+        const currentPanelState = getReplayPanelState(panel.id);
+        if (!currentPanelState || result.contextChanged) {
+          continue;
+        }
+
+        if (result.failed) {
+          setContextHistoryUiState(
+            currentPanelState.panel.symbol,
+            currentPanelState.panel.timeframe,
+            "failed",
+            "Could not load history for this replay context.",
+            "context-sync"
+          );
+          continue;
+        }
+
+        if (!result.resolved) {
+          setContextHistoryUiState(
+            currentPanelState.panel.symbol,
+            currentPanelState.panel.timeframe,
+            "empty",
+            "No earlier history is available for this replay context.",
+            "context-sync"
+          );
+          continue;
+        }
+
+        clearContextHistoryUiState(
+          currentPanelState.panel.symbol,
+          currentPanelState.panel.timeframe
+        );
+
+        if (!isReplaySync && panel.id === activeChart) {
+          const resolvedCursor = resolveReplayPosition(panel.id, replayCursorTime ?? replayStart);
+          if (resolvedCursor) {
+            setReplayIndex(resolvedCursor.index);
+            setReplayCursorTime(resolvedCursor.timestamp);
+          }
+        }
+      }
+    }
+
+    void hydrateReplayContexts();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeChart,
+    clearContextHistoryUiState,
+    ensureHistoryForTimestamp,
+    getReplayPanelState,
+    getRetainedLoadedRange,
+    isReplay,
+    isReplaySelectingStart,
+    isReplaySync,
+    layoutPanels,
+    replayCursorTime,
+    replayIndex,
+    replayStartTime,
+    resolveReplayPosition,
+    setContextHistoryUiState,
+    visiblePanels,
+  ]);
+
   // Keep dataRef in sync with state (including historical loads)
   useEffect(() => {
     dataRef.current = data;
@@ -993,6 +1246,21 @@ function AppInner() {
 
   useEffect(() => {
     requiredContextsRef.current = requiredContexts;
+  }, [requiredContexts]);
+
+  useEffect(() => {
+    const activeKeys = new Set<MarketContextKey>(requiredContexts.map((context) => context.key));
+
+    setHistoryUiStates((current) => {
+      const nextEntries = Object.entries(current).filter(([key]) =>
+        activeKeys.has(key as MarketContextKey)
+      );
+      if (nextEntries.length === Object.keys(current).length) {
+        return current;
+      }
+
+      return Object.fromEntries(nextEntries) as Record<MarketContextKey, HistoryUiState>;
+    });
   }, [requiredContexts]);
 
   useEffect(() => {
@@ -1116,17 +1384,59 @@ function AppInner() {
     async function ensureVisibleHistoryLoaded() {
       for (const context of requiredContexts) {
         try {
-          const candles = await fetchHistoricalDeduped(
-            buildInitialHistoricalRequest(context.symbol, context.timeframe)
+          const request = buildInitialHistoricalRequest(context.symbol, context.timeframe);
+          const alreadyCovered = isRangeCovered(
+            getRetainedLoadedRange(context.symbol, context.timeframe),
+            request.from,
+            request.to
           );
 
+          if (alreadyCovered) {
+            clearContextHistoryUiState(context.symbol, context.timeframe);
+            continue;
+          }
+
+          setContextHistoryUiState(
+            context.symbol,
+            context.timeframe,
+            "loading",
+            "Loading history for this panel...",
+            "initial"
+          );
+
+          const candles = await fetchHistoricalDeduped(request);
+
           if (cancelled || candles.length === 0) {
+            const retainedCandles = dataRef.current[context.symbol]?.[context.timeframe] ?? [];
+            if (!cancelled) {
+              if (retainedCandles.length > 0) {
+                clearContextHistoryUiState(context.symbol, context.timeframe);
+              } else {
+                setContextHistoryUiState(
+                  context.symbol,
+                  context.timeframe,
+                  "empty",
+                  "No history is available for this panel yet.",
+                  "initial"
+                );
+              }
+            }
             continue;
           }
 
           applyHistoricalCandles(context.symbol, context.timeframe, candles);
+          clearContextHistoryUiState(context.symbol, context.timeframe);
         } catch (error) {
           historicalLoadFailed = true;
+          if (!cancelled) {
+            setContextHistoryUiState(
+              context.symbol,
+              context.timeframe,
+              "failed",
+              "Could not load history for this panel.",
+              "initial"
+            );
+          }
           console.error(`[App] Failed to load ${context.key}:`, error);
         }
       }
@@ -1149,9 +1459,12 @@ function AppInner() {
     };
   }, [
     applyHistoricalCandles,
+    clearContextHistoryUiState,
     clearProviderNotice,
     fetchHistoricalDeduped,
+    getRetainedLoadedRange,
     requiredContexts,
+    setContextHistoryUiState,
     showProviderNotice,
   ]);
 
@@ -1324,13 +1637,14 @@ function AppInner() {
             replayCursorTime={replayCursorTime}
             replayIndex={replayIndex}
             isReplaySync={isReplaySync}
-            onReplayStart={handleReplayStart}
-            supportedSymbols={supportedSymbols}
-            showSessions={showSessions}
-            registerHistoryControls={registerHistoryControls}
-          />
-        </div>
+          onReplayStart={handleReplayStart}
+          supportedSymbols={supportedSymbols}
+          showSessions={showSessions}
+          historyUiStates={historyUiStates}
+          registerHistoryControls={registerHistoryControls}
+        />
       </div>
+    </div>
     </div>
   );
 }

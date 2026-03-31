@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import ChartPanel from "./ChartPanel";
 import { useWorkspaceStore } from "../store/useWorkspaceStore";
 import { useLayoutState } from "../store/useLayoutState";
-import type { SupportedSymbol, Timeframe } from "../types/marketData";
+import type { HistoryUiState, SupportedSymbol, Timeframe } from "../types/marketData";
 import {
   DEFAULT_TRENDLINE_EXTENSION,
   EMPTY_CHART_DRAWINGS,
@@ -357,6 +357,7 @@ export default function LayoutManager({
   onReplayStart,
   supportedSymbols,
   showSessions,
+  historyUiStates,
   registerHistoryControls,
 }: any) {
   const [vSplit, setVSplit] = useState(0.5);
@@ -704,6 +705,10 @@ export default function LayoutManager({
       replayIndex={replayIndex}
       isReplaySync={isReplaySync}
       onReplayStart={onReplayStart}
+      historyUiState={
+        historyUiStates?.[`${panel.symbol}::${panel.timeframe}`] ??
+        ({ status: "idle", message: null } as HistoryUiState)
+      }
       canUndo={canUndo}
       canRedo={canRedo}
       onUndo={undoDrawings}

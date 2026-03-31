@@ -14,7 +14,7 @@ import { useToolStore } from "./store/useToolStore";
 import { useThemeStore } from "./store/useThemeStore";
 import { useCandleStore } from "./store/useCandleStore";
 import DrawingStylePanel from "./components/DrawingStylePanel";
-import type { Candle } from "./types/marketData";
+import type { Candle, HistoryUiState } from "./types/marketData";
 import type { ReplayStartPayload } from "./types/replay";
 import { SESSION_CONFIG, getSessionRange, type SessionKey } from "./types/sessions";
 import { formatReplayTime } from "./utils/replayDisplay";
@@ -99,6 +99,7 @@ type Props = {
   replayIndex?: number;
   isReplaySync?: boolean;
   onReplayStart?: (payload: ReplayStartPayload) => void;
+  historyUiState?: HistoryUiState;
   canUndo?: boolean;
   canRedo?: boolean;
   onUndo?: () => void;
@@ -458,6 +459,7 @@ export default function Chart({
   replayIndex = 0,
   isReplaySync = false,
   onReplayStart,
+  historyUiState = { status: "idle", message: null },
   canUndo = false,
   canRedo = false,
   onUndo,
@@ -529,6 +531,13 @@ export default function Chart({
       replayStartTime !== null &&
       (fullData.length === 0 || replayStartTime < fullData[0].time)
   );
+  const historyLoading = historyUiState.status === "loading";
+  const historyFailed = historyUiState.status === "failed";
+  const historyEmpty = historyUiState.status === "empty";
+  const showCenteredHistoryOverlay =
+    !isReplaySelectingForThisChart &&
+    (fullData.length === 0 || hasNoEarlierReplayData) &&
+    (historyLoading || historyFailed || historyEmpty);
 
   useEffect(() => {
     toolRef.current = tool;
@@ -2241,7 +2250,7 @@ export default function Chart({
           : activeChart === chartId);
 
       if (shouldApplyReplay && displayData.length > 0) {
-        if (isReplaySync && replayCursorTime !== null) {
+        if (replayCursorTime !== null) {
           const replayEndIndex = findCandleIndexAtOrBefore(displayData, replayCursorTime);
           displayData = displayData.slice(0, replayEndIndex + 1);
         } else {
@@ -2382,6 +2391,44 @@ export default function Chart({
         </div>
       )}
 
+      {!isReplaySelectingForThisChart &&
+        !showCenteredHistoryOverlay &&
+        historyUiState.status !== "idle" && (
+        <div
+          style={{
+            position: "absolute",
+            top: "8px",
+            left: "8px",
+            zIndex: 10,
+            pointerEvents: "none",
+            padding: "4px 10px",
+            borderRadius: "999px",
+            background:
+              historyLoading
+                ? "rgba(37, 99, 235, 0.16)"
+                : historyFailed
+                  ? "rgba(220, 38, 38, 0.16)"
+                  : "rgba(245, 158, 11, 0.16)",
+            border:
+              historyLoading
+                ? "1px solid rgba(37, 99, 235, 0.28)"
+                : historyFailed
+                  ? "1px solid rgba(220, 38, 38, 0.28)"
+                  : "1px solid rgba(245, 158, 11, 0.28)",
+            color: "var(--panel-text)",
+            fontSize: "11px",
+            fontWeight: 600,
+            boxShadow: "0 6px 16px rgba(0,0,0,0.18)",
+          }}
+        >
+          {historyLoading
+            ? "Loading history..."
+            : historyFailed
+              ? "History load failed"
+              : "No earlier history"}
+        </div>
+      )}
+
       {hidden && !isReplaySelectingForThisChart && (
         <div
           style={{
@@ -2438,7 +2485,7 @@ export default function Chart({
         </div>
       )}
 
-      {isReplay && !isReplaySelectingForThisChart && hasNoEarlierReplayData && (
+      {showCenteredHistoryOverlay && (
         <div
           style={{
             position: "absolute",
@@ -2464,7 +2511,13 @@ export default function Chart({
               boxShadow: "0 8px 20px rgba(0,0,0,0.24)",
             }}
           >
-            No earlier data for this panel
+            {historyLoading
+              ? "Loading history for this panel"
+              : historyFailed
+                ? "History could not be loaded"
+                : hasNoEarlierReplayData
+                  ? "No earlier data for this panel"
+                  : "No history available for this panel"}
             <div
               style={{
                 marginTop: "6px",
@@ -2473,7 +2526,14 @@ export default function Chart({
                 fontSize: "11px",
               }}
             >
-              Choose a later replay start or load more history
+              {historyUiState.message ??
+                (historyLoading
+                  ? "Waiting for historical data to finish loading..."
+                  : historyFailed
+                    ? "Try again or switch to a nearby symbol or timeframe."
+                    : hasNoEarlierReplayData
+                      ? "Choose a later replay start or switch to a closer context."
+                      : "Try switching symbol or timeframe to load a different range.")}
             </div>
           </div>
         </div>

@@ -1,5 +1,5 @@
 import Chart from "../Chart";
-import type { Candle, SupportedSymbol, Timeframe } from "../types/marketData";
+import type { Candle, HistoryUiState, SupportedSymbol, Timeframe } from "../types/marketData";
 import type { ReplayStartPayload } from "../types/replay";
 import type {
   ChartDrawings,
@@ -56,6 +56,7 @@ type Props = {
   replayIndex?: number;
   isReplaySync?: boolean;
   onReplayStart?: (payload: ReplayStartPayload) => void;
+  historyUiState?: HistoryUiState;
   canUndo?: boolean;
   canRedo?: boolean;
   onUndo?: () => void;
@@ -96,6 +97,7 @@ export default function ChartPanel({
   replayIndex,
   isReplaySync,
   onReplayStart,
+  historyUiState,
   canUndo,
   canRedo,
   onUndo,
@@ -239,6 +241,7 @@ export default function ChartPanel({
           replayIndex={replayIndex}
           isReplaySync={isReplaySync}
           onReplayStart={onReplayStart}
+          historyUiState={historyUiState}
           canUndo={canUndo}
           canRedo={canRedo}
           onUndo={onUndo}
