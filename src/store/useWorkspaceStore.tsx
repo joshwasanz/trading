@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { Workspace } from "../types/workspace";
+import { normalizeInstrumentId, normalizeInstrumentPanels } from "../instruments";
 
 const STORAGE_KEY = "trading_workspaces_v1";
 
@@ -38,14 +39,24 @@ function loadWorkspacesFromStorage(): Workspace[] {
 }
 
 function sanitizeWorkspace(workspace: WorkspaceRecord): Workspace {
+  const panels = Array.isArray(workspace.panels)
+    ? normalizeInstrumentPanels(workspace.panels)
+    : [];
+  const drawingsBySymbol = Object.entries(workspace.drawingsBySymbol ?? {}).reduce<
+    Workspace["drawingsBySymbol"]
+  >((next, [symbol, drawings]) => {
+    next[normalizeInstrumentId(symbol)] = drawings;
+    return next;
+  }, {});
+
   return {
     id: workspace.id,
     name: workspace.name,
     createdAt: workspace.createdAt,
     updatedAt: workspace.updatedAt,
     layoutType: workspace.layoutType,
-    panels: workspace.panels,
-    drawingsBySymbol: workspace.drawingsBySymbol,
+    panels,
+    drawingsBySymbol,
   };
 }
 

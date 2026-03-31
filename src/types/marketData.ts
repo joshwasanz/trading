@@ -14,6 +14,16 @@ export type SupportedSymbol = {
   label: string;
 };
 
+export type ProviderMode = "synthetic" | "twelve_data";
+
+export type ProviderCapabilities = {
+  providerMode: ProviderMode;
+  supportedSymbols: SupportedSymbol[];
+  supportedTimeframes: Timeframe[];
+  liveSupported: boolean;
+  notice: string | null;
+};
+
 export type HistoricalRequest = {
   symbol: string;
   timeframe: Timeframe;

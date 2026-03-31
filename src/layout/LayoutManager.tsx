@@ -4,6 +4,11 @@ import { useWorkspaceStore } from "../store/useWorkspaceStore";
 import { useLayoutState } from "../store/useLayoutState";
 import type { HistoryUiState, SupportedSymbol, Timeframe } from "../types/marketData";
 import {
+  DEFAULT_PANELS,
+  normalizeInstrumentId,
+  sanitizePanelsForCapabilities,
+} from "../instruments";
+import {
   DEFAULT_TRENDLINE_EXTENSION,
   EMPTY_CHART_DRAWINGS,
   type ChartDrawings,
@@ -27,15 +32,6 @@ type Panel = {
   symbol: string;
   timeframe: Timeframe;
 };
-
-const DEFAULT_PANELS: Panel[] = [
-  { id: "A", symbol: "nq", timeframe: "15s" },
-  { id: "B", symbol: "es", timeframe: "15s" },
-  { id: "C", symbol: "nq", timeframe: "1m" },
-  { id: "D", symbol: "es", timeframe: "1m" },
-  { id: "E", symbol: "nq", timeframe: "3m" },
-  { id: "F", symbol: "es", timeframe: "3m" },
-];
 
 const DRAWINGS_STORAGE_KEY = "layout-manager-drawings-v2";
 const LEGACY_DRAWINGS_STORAGE_KEY = "layout-manager-drawings-v1";
@@ -185,11 +181,20 @@ function normalizeDrawingsState(value: unknown): DrawingsState {
     return {};
   }
 
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).map(([key, chartDrawings]) => [
-      key,
-      normalizeChartDrawings(chartDrawings),
-    ])
+  return Object.entries(value as Record<string, unknown>).reduce<DrawingsState>(
+    (next, [symbol, chartDrawings]) => {
+      const normalizedSymbol = normalizeInstrumentId(symbol);
+      const normalizedDrawings = normalizeChartDrawings(chartDrawings);
+
+      return {
+        ...next,
+        [normalizedSymbol]: mergeChartDrawings(
+          next[normalizedSymbol] ?? EMPTY_CHART_DRAWINGS,
+          normalizedDrawings
+        ),
+      };
+    },
+    {}
   );
 }
 
@@ -356,7 +361,12 @@ export default function LayoutManager({
   isReplaySync,
   onReplayStart,
   supportedSymbols,
+  supportedTimeframes = ["15s", "1m", "3m"],
   showSessions,
+  showSessionLevels,
+  showSessionRanges,
+  showSma,
+  smaPeriod,
   historyUiStates,
   registerHistoryControls,
 }: any) {
@@ -411,12 +421,30 @@ export default function LayoutManager({
     if (!workspace) return;
 
     // Apply workspace state
-    setPanels(workspace.panels);
+    setPanels(
+      sanitizePanelsForCapabilities(
+        workspace.panels,
+        (supportedSymbols as SupportedSymbol[] | undefined) ?? [],
+        supportedTimeframes as Timeframe[]
+      )
+    );
     setDrawingsBySymbol(normalizeDrawingsState(workspace.drawingsBySymbol));
     setUndoStack([]);
     setRedoStack([]);
     // layoutType is controlled by parent, so we don't modify it here
-  }, [activeWorkspaceId, workspaces]);
+  }, [activeWorkspaceId, supportedSymbols, supportedTimeframes, workspaces]);
+
+  useEffect(() => {
+    setPanels((current) => {
+      const sanitized = sanitizePanelsForCapabilities(
+        current,
+        (supportedSymbols as SupportedSymbol[] | undefined) ?? [],
+        supportedTimeframes as Timeframe[]
+      );
+
+      return JSON.stringify(current) === JSON.stringify(sanitized) ? current : sanitized;
+    });
+  }, [supportedSymbols, supportedTimeframes]);
 
   // Auto-save workspace changes (debounced 1000ms)
   useEffect(() => {
@@ -441,8 +469,22 @@ export default function LayoutManager({
   };
 
   const updatePanel = useCallback((id: string, updates: Partial<Panel>) => {
-    setPanels((prev) => prev.map((panel) => (panel.id === id ? { ...panel, ...updates } : panel)));
-  }, []);
+    setPanels((prev) =>
+      sanitizePanelsForCapabilities(
+        prev.map((panel) =>
+          panel.id === id
+            ? {
+                ...panel,
+                ...updates,
+                symbol: updates.symbol ? normalizeInstrumentId(updates.symbol) : panel.symbol,
+              }
+            : panel
+        ),
+        (supportedSymbols as SupportedSymbol[] | undefined) ?? [],
+        supportedTimeframes as Timeframe[]
+      )
+    );
+  }, [supportedSymbols, supportedTimeframes]);
 
   const getSymbolDrawings = useCallback(
     (symbol: string): ChartDrawings => drawingsBySymbol[symbol] ?? EMPTY_CHART_DRAWINGS,
@@ -695,6 +737,7 @@ export default function LayoutManager({
       onClearDrawings={() => clearDrawings(panel.symbol)}
       onFocus={onFocus}
       supportedSymbols={supportedSymbols as SupportedSymbol[] | undefined}
+      supportedTimeframes={supportedTimeframes as Timeframe[] | undefined}
       onSymbolChange={(symbol) => updatePanel(panel.id, { symbol })}
       onTimeframeChange={(timeframe) => updatePanel(panel.id, { timeframe })}
       isReplay={isReplay}
@@ -714,6 +757,10 @@ export default function LayoutManager({
       onUndo={undoDrawings}
       onRedo={redoDrawings}
       showSessions={showSessions}
+      showSessionLevels={showSessionLevels}
+      showSessionRanges={showSessionRanges}
+      showSma={showSma}
+      smaPeriod={smaPeriod}
       {...sharedProps}
     />
   );

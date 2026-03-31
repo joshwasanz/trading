@@ -39,6 +39,7 @@ type Props = {
   ) => void;
   onFocus: () => void;
   supportedSymbols?: SupportedSymbol[];
+  supportedTimeframes?: Timeframe[];
   onSymbolChange?: (symbol: string) => void;
   onTimeframeChange?: (tf: Timeframe) => void;
   activeChart?: string | null;
@@ -62,6 +63,10 @@ type Props = {
   onUndo?: () => void;
   onRedo?: () => void;
   showSessions?: boolean;
+  showSessionLevels?: boolean;
+  showSessionRanges?: boolean;
+  showSma?: boolean;
+  smaPeriod?: number;
 };
 
 export default function ChartPanel({
@@ -80,6 +85,7 @@ export default function ChartPanel({
   onCommitPreviewDrawing,
   onFocus,
   supportedSymbols = [],
+  supportedTimeframes = ["15s", "1m", "3m"],
   onSymbolChange,
   onTimeframeChange,
   activeChart,
@@ -102,7 +108,11 @@ export default function ChartPanel({
   canRedo,
   onUndo,
   onRedo,
-  showSessions = false,
+  showSessions = true,
+  showSessionLevels = true,
+  showSessionRanges = true,
+  showSma = false,
+  smaPeriod = 20,
 }: Props) {
   const chartId = panelId;
   const symbolOptions = supportedSymbols.some((candidate) => candidate.id === symbol)
@@ -133,10 +143,10 @@ export default function ChartPanel({
 
         {/* Timeframe Selector */}
         <div style={{ display: "flex", gap: "2px", marginLeft: "8px" }}>
-          {["15s", "1m", "3m"].map((tf) => (
+          {supportedTimeframes.map((tf) => (
             <button
               key={tf}
-              onClick={() => onTimeframeChange?.(tf as Timeframe)}
+              onClick={() => onTimeframeChange?.(tf)}
               className={`ui-button ${timeframe === tf ? "ui-button--active" : ""}`}
               style={{ height: "24px", padding: "0 6px", fontSize: "11px" }}
             >
@@ -247,6 +257,10 @@ export default function ChartPanel({
           onUndo={onUndo}
           onRedo={onRedo}
           showSessions={showSessions}
+          showSessionLevels={showSessionLevels}
+          showSessionRanges={showSessionRanges}
+          showSma={showSma}
+          smaPeriod={smaPeriod}
         />
       </div>
     </div>

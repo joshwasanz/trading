@@ -19,7 +19,14 @@ import type {
   Timeframe,
 } from "./types/marketData";
 import type { ReplayStartPayload } from "./types/replay";
-import { getSessionRange, type SessionKey } from "./types/sessions";
+import { getSessionRange, type SessionKey } from "./utils/sessions";
+import { DEFAULT_SMA_PERIOD, sanitizeIndicatorPeriod } from "./utils/indicators";
+import {
+  DEFAULT_PANELS,
+  DEFAULT_SUPPORTED_SYMBOLS,
+  DEFAULT_SUPPORTED_SYMBOL_IDS,
+  normalizeInstrumentId,
+} from "./instruments";
 import {
   clearLegacyMarketDataCaches,
   sanitizeCachedCandleData,
@@ -30,6 +37,7 @@ import { findCandleIndexAtOrBefore } from "./utils/replay";
 const DATA_STORAGE_KEY = "chart-data-v2";
 const LEGACY_DATA_STORAGE_KEYS = ["chart-data-v1"];
 const MAX_HISTORY_BACKFILL_ATTEMPTS = 5;
+const DEFAULT_SUPPORTED_TIMEFRAMES: Timeframe[] = ["15s", "1m", "3m"];
 
 type Panel = {
   id: string;
@@ -49,27 +57,17 @@ type LiveMarketSubscription = {
   unsubscribe: () => Promise<void> | void;
 };
 
-const DEFAULT_PANELS: Panel[] = [
-  { id: "A", symbol: "nq", timeframe: "15s" },
-  { id: "B", symbol: "es", timeframe: "15s" },
-  { id: "C", symbol: "nq", timeframe: "1m" },
-  { id: "D", symbol: "es", timeframe: "1m" },
-  { id: "E", symbol: "nq", timeframe: "3m" },
-  { id: "F", symbol: "es", timeframe: "3m" },
-];
-
 function createEmptyTimeframeData(): Record<Timeframe, Candle[]> {
   return { "15s": [], "1m": [], "3m": [] };
 }
 
-const initialDataState: Record<string, Record<Timeframe, Candle[]>> = {
-  nq: createEmptyTimeframeData(),
-  es: createEmptyTimeframeData(),
-};
-const DEFAULT_SUPPORTED_SYMBOLS: SupportedSymbol[] = [
-  { id: "nq", label: "NASDAQ" },
-  { id: "es", label: "S&P 500" },
-];
+function createInitialDataState(): Record<string, Record<Timeframe, Candle[]>> {
+  return Object.fromEntries(
+    DEFAULT_SUPPORTED_SYMBOL_IDS.map((symbolId) => [symbolId, createEmptyTimeframeData()])
+  ) as Record<string, Record<Timeframe, Candle[]>>;
+}
+
+const initialDataState: Record<string, Record<Timeframe, Candle[]>> = createInitialDataState();
 
 function makeMarketContextKey(symbol: string, timeframe: Timeframe): MarketContextKey {
   return `${symbol}::${timeframe}` as MarketContextKey;
@@ -123,18 +121,23 @@ function readStoredData(): Record<string, Record<Timeframe, Candle[]>> {
     if (!stored) return initialDataState;
 
     const parsed = sanitizeCachedCandleData(JSON.parse(stored));
-    const merged: Record<string, Record<Timeframe, Candle[]>> = {
-      nq: createEmptyTimeframeData(),
-      es: createEmptyTimeframeData(),
-    };
+    const merged: Record<string, Record<Timeframe, Candle[]>> = createInitialDataState();
 
     for (const [symbol, series] of Object.entries(parsed)) {
-      const current = merged[symbol] ?? createEmptyTimeframeData();
+      const normalizedSymbol = normalizeInstrumentId(symbol);
+      const current = merged[normalizedSymbol] ?? createEmptyTimeframeData();
+      const next15s = sanitizeCandleSeries(
+        normalizedSymbol,
+        "15s",
+        series["15s"] ?? current["15s"]
+      );
+      const next1m = sanitizeCandleSeries(normalizedSymbol, "1m", series["1m"] ?? current["1m"]);
+      const next3m = sanitizeCandleSeries(normalizedSymbol, "3m", series["3m"] ?? current["3m"]);
 
-      merged[symbol] = {
-        "15s": sanitizeCandleSeries(symbol, "15s", series["15s"] ?? current["15s"]),
-        "1m": sanitizeCandleSeries(symbol, "1m", series["1m"] ?? current["1m"]),
-        "3m": sanitizeCandleSeries(symbol, "3m", series["3m"] ?? current["3m"]),
+      merged[normalizedSymbol] = {
+        "15s": mergeCandlesPreservingOrder(current["15s"], next15s),
+        "1m": mergeCandlesPreservingOrder(current["1m"], next1m),
+        "3m": mergeCandlesPreservingOrder(current["3m"], next3m),
       };
     }
 
@@ -392,8 +395,12 @@ void findIndexByTime;
 function AppInner() {
   const [data, setData] = useState(() => readStoredData());
   const dataRef = useRef(data);
+  const layoutPanelsRef = useRef<Panel[]>(DEFAULT_PANELS);
+  const activeChartRef = useRef<string | null>(null);
+  const isReplayRef = useRef(false);
+  const isReplaySyncRef = useRef(false);
   const [loadedRanges, setLoadedRanges] = useState<LoadedRangesState>(() =>
-    createLoadedRangesState(DEFAULT_SUPPORTED_SYMBOLS.map(({ id }) => id))
+    createLoadedRangesState(DEFAULT_SUPPORTED_SYMBOL_IDS)
   );
   const loadedRangesRef = useRef(loadedRanges);
   const inFlightHistoricalRequestsRef = useRef<Map<string, Promise<Candle[]>>>(new Map());
@@ -419,7 +426,11 @@ function AppInner() {
   const [playSpeed, setPlaySpeed] = useState<0.5 | 1 | 2 | 5>(1);
   const [isReplaySync, setIsReplaySync] = useState(false);
   const [jumpTime, setJumpTime] = useState("");
-  const [showSessions, setShowSessions] = useState(false);
+  const [showSessions, setShowSessions] = useState(true);
+  const [showSessionLevels, setShowSessionLevels] = useState(true);
+  const [showSessionRanges, setShowSessionRanges] = useState(true);
+  const [showSma, setShowSma] = useState(false);
+  const [smaPeriod, setSmaPeriod] = useState(DEFAULT_SMA_PERIOD);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [replayHistoryStatus, setReplayHistoryStatus] =
@@ -428,6 +439,9 @@ function AppInner() {
   const [providerNotice, setProviderNotice] = useState<ProviderNotice | null>(null);
   const [supportedSymbols, setSupportedSymbols] =
     useState<SupportedSymbol[]>(DEFAULT_SUPPORTED_SYMBOLS);
+  const [supportedTimeframes, setSupportedTimeframes] =
+    useState<Timeframe[]>(DEFAULT_SUPPORTED_TIMEFRAMES);
+  const [liveSupported, setLiveSupported] = useState(true);
   const [historyUiStates, setHistoryUiStates] =
     useState<Record<MarketContextKey, HistoryUiState>>({});
 
@@ -501,6 +515,28 @@ function AppInner() {
 
   const redoDrawings = useCallback(() => {
     redoHistoryRef.current?.();
+  }, []);
+
+  const shouldApplyLiveUpdate = useCallback((symbol: string, timeframe: Timeframe) => {
+    if (!isReplayRef.current) {
+      return true;
+    }
+
+    if (isReplaySyncRef.current) {
+      return false;
+    }
+
+    const activePanelId = activeChartRef.current;
+    if (!activePanelId) {
+      return true;
+    }
+
+    const activePanel = layoutPanelsRef.current.find((panel) => panel.id === activePanelId);
+    if (!activePanel) {
+      return true;
+    }
+
+    return !(activePanel.symbol === symbol && activePanel.timeframe === timeframe);
   }, []);
 
   const showProviderNotice = useCallback((tone: ProviderNotice["tone"], message: string) => {
@@ -1062,8 +1098,13 @@ function AppInner() {
 
   // Jump to session start time (e.g., "london", "newyork")
   const jumpToSession = (session: SessionKey) => {
-    const now = new Date();
-    const { start } = getSessionRange(now, session);
+    const anchorTimestamp =
+      isReplay ? replayCursorTime ?? replayStartTime : null;
+    const anchorDate =
+      anchorTimestamp !== null
+        ? new Date(anchorTimestamp * 1000)
+        : new Date();
+    const { start } = getSessionRange(anchorDate, session);
     goToTime(start);
   };
 
@@ -1249,6 +1290,22 @@ function AppInner() {
   }, [requiredContexts]);
 
   useEffect(() => {
+    layoutPanelsRef.current = layoutPanels;
+  }, [layoutPanels]);
+
+  useEffect(() => {
+    activeChartRef.current = activeChart;
+  }, [activeChart]);
+
+  useEffect(() => {
+    isReplayRef.current = isReplay;
+  }, [isReplay]);
+
+  useEffect(() => {
+    isReplaySyncRef.current = isReplaySync;
+  }, [isReplaySync]);
+
+  useEffect(() => {
     const activeKeys = new Set<MarketContextKey>(requiredContexts.map((context) => context.key));
 
     setHistoryUiStates((current) => {
@@ -1308,10 +1365,9 @@ function AppInner() {
       updatedAt: Date.now(),
       layoutType: "2",
       panels: DEFAULT_PANELS,
-      drawingsBySymbol: {
-        nq: EMPTY_CHART_DRAWINGS,
-        es: EMPTY_CHART_DRAWINGS,
-      },
+      drawingsBySymbol: Object.fromEntries(
+        DEFAULT_SUPPORTED_SYMBOL_IDS.map((symbolId) => [symbolId, EMPTY_CHART_DRAWINGS])
+      ),
     };
 
     createDefaultWorkspace(defaultWorkspace);
@@ -1321,14 +1377,16 @@ function AppInner() {
   useEffect(() => {
     let cancelled = false;
 
-    async function loadSupportedSymbols() {
+    async function loadProviderCapabilities() {
       try {
-        const nextSymbols = await marketDataProvider.getSupportedSymbols();
-        if (!cancelled && nextSymbols.length > 0) {
-          clearProviderNotice(
-            (notice) => notice.message === "Using default symbol list while provider symbols load."
-          );
+        const capabilities = await marketDataProvider.getCapabilities();
+        if (cancelled) {
+          return;
+        }
+
+        if (capabilities.supportedSymbols.length > 0) {
           setSupportedSymbols((current) => {
+            const nextSymbols = capabilities.supportedSymbols;
             const sameSymbols =
               current.length === nextSymbols.length &&
               current.every(
@@ -1340,15 +1398,32 @@ function AppInner() {
             return sameSymbols ? current : nextSymbols;
           });
         }
+
+        setSupportedTimeframes((current) => {
+          const sameTimeframes =
+            current.length === capabilities.supportedTimeframes.length &&
+            current.every((timeframe, index) => timeframe === capabilities.supportedTimeframes[index]);
+
+          return sameTimeframes ? current : capabilities.supportedTimeframes;
+        });
+        setLiveSupported(capabilities.liveSupported);
+
+        if (capabilities.notice) {
+          showProviderNotice("warning", capabilities.notice);
+        } else {
+          clearProviderNotice((notice) => notice.tone === "warning");
+        }
       } catch (error) {
-        console.warn("[App] Falling back to default symbol list:", error);
+        console.warn("[App] Falling back to default provider capabilities:", error);
         if (!cancelled) {
-          showProviderNotice("warning", "Using default symbol list while provider symbols load.");
+          setSupportedTimeframes(DEFAULT_SUPPORTED_TIMEFRAMES);
+          setLiveSupported(true);
+          showProviderNotice("warning", "Using default provider capabilities while backend settings load.");
         }
       }
     }
 
-    void loadSupportedSymbols();
+    void loadProviderCapabilities();
 
     return () => {
       cancelled = true;
@@ -1473,8 +1548,28 @@ function AppInner() {
     let subscriptionFailed = false;
 
     async function syncDemandDrivenSubscriptions() {
-      const nextContexts = new Set(requiredContexts.map((context) => context.key));
       const currentSubscriptions = liveSubscriptionsRef.current;
+
+      if (!liveSupported) {
+        for (const [key, subscription] of Array.from(currentSubscriptions.entries())) {
+          try {
+            await subscription.unsubscribe();
+            currentSubscriptions.delete(key);
+          } catch (error) {
+            console.error(`[App] Live unsubscribe error for ${key}:`, error);
+          }
+        }
+
+        if (!cancelled) {
+          clearProviderNotice(
+            (notice) => notice.message === "Live data subscription failed for one or more streams."
+          );
+        }
+
+        return;
+      }
+
+      const nextContexts = new Set(requiredContexts.map((context) => context.key));
       const pendingSubscriptions = pendingLiveSubscriptionsRef.current;
 
       for (const context of requiredContexts) {
@@ -1489,7 +1584,7 @@ function AppInner() {
             context.symbol,
             context.timeframe,
             (incoming) => {
-              if (cancelled) return;
+              if (cancelled || !shouldApplyLiveUpdate(context.symbol, context.timeframe)) return;
 
               setData((prev) => {
                 const currentSymbolData = prev[context.symbol] ?? createEmptyTimeframeData();
@@ -1566,7 +1661,7 @@ function AppInner() {
     return () => {
       cancelled = true;
     };
-  }, [clearProviderNotice, requiredContexts, showProviderNotice]);
+  }, [clearProviderNotice, liveSupported, requiredContexts, shouldApplyLiveUpdate, showProviderNotice]);
 
   useEffect(() => {
     return () => {
@@ -1611,6 +1706,14 @@ function AppInner() {
           providerNotice={providerNotice}
           showSessions={showSessions}
           setShowSessions={setShowSessions}
+          showSessionLevels={showSessionLevels}
+          setShowSessionLevels={setShowSessionLevels}
+          showSessionRanges={showSessionRanges}
+          setShowSessionRanges={setShowSessionRanges}
+          showSma={showSma}
+          setShowSma={setShowSma}
+          smaPeriod={smaPeriod}
+          setSmaPeriod={(period) => setSmaPeriod(sanitizeIndicatorPeriod(period))}
           jumpToSession={jumpToSession}
           canUndo={canUndo}
           canRedo={canRedo}
@@ -1637,12 +1740,17 @@ function AppInner() {
             replayCursorTime={replayCursorTime}
             replayIndex={replayIndex}
             isReplaySync={isReplaySync}
-          onReplayStart={handleReplayStart}
-          supportedSymbols={supportedSymbols}
-          showSessions={showSessions}
-          historyUiStates={historyUiStates}
-          registerHistoryControls={registerHistoryControls}
-        />
+            onReplayStart={handleReplayStart}
+            supportedSymbols={supportedSymbols}
+            supportedTimeframes={supportedTimeframes}
+            showSessions={showSessions}
+            showSessionLevels={showSessionLevels}
+            showSessionRanges={showSessionRanges}
+            showSma={showSma}
+            smaPeriod={smaPeriod}
+            historyUiStates={historyUiStates}
+            registerHistoryControls={registerHistoryControls}
+          />
       </div>
     </div>
     </div>

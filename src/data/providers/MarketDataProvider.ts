@@ -1,6 +1,7 @@
 import type {
   Candle,
   HistoricalRequest,
+  ProviderCapabilities,
   SupportedSymbol,
   Timeframe,
 } from "../../types/marketData";
@@ -10,6 +11,7 @@ export type LiveSubscription = {
 };
 
 export interface MarketDataProvider {
+  getCapabilities(): Promise<ProviderCapabilities>;
   getSupportedSymbols(): Promise<SupportedSymbol[]>;
   getHistorical(request: HistoricalRequest): Promise<Candle[]>;
   subscribeLive(

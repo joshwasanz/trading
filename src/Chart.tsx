@@ -5,6 +5,7 @@ import {
   type CandlestickData,
   type IChartApi,
   type ISeriesApi,
+  type LineData,
   type Logical,
   type MouseEventParams,
   type Time,
@@ -16,7 +17,21 @@ import { useCandleStore } from "./store/useCandleStore";
 import DrawingStylePanel from "./components/DrawingStylePanel";
 import type { Candle, HistoryUiState } from "./types/marketData";
 import type { ReplayStartPayload } from "./types/replay";
-import { SESSION_CONFIG, getSessionRange, type SessionKey } from "./types/sessions";
+import {
+  SESSION_CONFIG,
+  buildSessionRanges,
+  buildSessionStats,
+  getSessionForTimestamp,
+  getSessionLabel,
+  type SessionRange,
+  type SessionStats,
+} from "./utils/sessions";
+import {
+  computeSma,
+  getIncrementalSmaPoint,
+  sanitizeIndicatorPeriod,
+  type IndicatorPoint,
+} from "./utils/indicators";
 import { formatReplayTime } from "./utils/replayDisplay";
 import {
   DEFAULT_TRENDLINE_EXTENSION,
@@ -105,6 +120,10 @@ type Props = {
   onUndo?: () => void;
   onRedo?: () => void;
   showSessions?: boolean;
+  showSessionLevels?: boolean;
+  showSessionRanges?: boolean;
+  showSma?: boolean;
+  smaPeriod?: number;
 };
 
 type ScreenPoint = {
@@ -129,8 +148,6 @@ type DragTarget = {
 const TEXT_FONT_SIZE = 12;
 const TEXT_PADDING_X = 4;
 const TEXT_PADDING_Y = 3;
-const SESSION_KEYS: SessionKey[] = ["asia", "london", "newyork"];
-
 function getLineBoundaryIntersections(
   start: ScreenPoint,
   end: ScreenPoint,
@@ -399,6 +416,13 @@ function toChartCandle(candle: Candle): CandlestickData<Time> {
   } as CandlestickData<Time>;
 }
 
+function toLinePoint(point: IndicatorPoint): LineData<Time> {
+  return {
+    time: point.time as UTCTimestamp,
+    value: point.value,
+  };
+}
+
 function getIncrementalLiveCandle(previous: Candle[], next: Candle[]): Candle | null {
   if (previous.length === 0 || next.length === 0) {
     return null;
@@ -464,11 +488,16 @@ export default function Chart({
   canRedo = false,
   onUndo,
   onRedo,
-  showSessions = false,
+  showSessions = true,
+  showSessionLevels = true,
+  showSessionRanges = true,
+  showSma = false,
+  smaPeriod = 20,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick", Time> | null>(null);
+  const smaSeriesRef = useRef<ISeriesApi<"Line", Time> | null>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
 
   const overlayFrameRef = useRef<number | null>(null);
@@ -494,9 +523,21 @@ export default function Chart({
   const replayStartTimeRef = useRef(replayStartTime);
   const replayCursorTimeRef = useRef(replayCursorTime);
   const showSessionsRef = useRef(showSessions);
+  const showSessionLevelsRef = useRef(showSessionLevels);
+  const showSessionRangesRef = useRef(showSessionRanges);
+  const showSmaRef = useRef(showSma);
+  const smaStateRef = useRef({
+    enabled: showSma,
+    period: sanitizeIndicatorPeriod(smaPeriod),
+  });
   const candleStoreDataRef = useRef<Record<string, Record<string, Candle[]>>>({});
   const dataRef = useRef(data);
   const displayedDataRef = useRef<Candle[]>(data);
+  const sessionRangesRef = useRef<SessionRange[]>([]);
+  const sessionStatsRef = useRef<SessionStats[]>([]);
+  const smaDataRef = useRef<IndicatorPoint[]>([]);
+  const sessionReferenceTimeRef = useRef<number | null>(null);
+  const activeSessionRef = useRef<ReturnType<typeof getSessionForTimestamp>>(null);
   const drawingsRef = useRef(drawings);
   const selectedDrawingRef = useRef<DrawingSelection | null>(null);
   const onAddTrendlineRef = useRef(onAddTrendline);
@@ -526,6 +567,17 @@ export default function Chart({
   const [chartReady, setChartReady] = useState(false);
   const fullData: Candle[] = data.length > 0 ? data : candleStoreData[symbol]?.[timeframe] ?? [];
   const replayActiveForThisChart = Boolean(isReplay && (isReplaySync || activeChart === chartId));
+  const sessionContextVisible = showSessions || showSessionLevels || showSessionRanges;
+  const latestCandleTime = fullData.length > 0 ? fullData[fullData.length - 1].time : null;
+  const sessionReferenceTime = replayActiveForThisChart
+    ? replayCursorTime ?? replayStartTime ?? latestCandleTime
+    : latestCandleTime;
+  const activeSession = sessionReferenceTime !== null
+    ? getSessionForTimestamp(sessionReferenceTime)
+    : null;
+  const activeSessionLabel = sessionReferenceTime !== null
+    ? getSessionLabel(activeSession)
+    : null;
   const hasNoEarlierReplayData = Boolean(
     replayActiveForThisChart &&
       replayStartTime !== null &&
@@ -574,6 +626,23 @@ export default function Chart({
   useEffect(() => {
     showSessionsRef.current = showSessions;
   }, [showSessions]);
+
+  useEffect(() => {
+    showSessionLevelsRef.current = showSessionLevels;
+  }, [showSessionLevels]);
+
+  useEffect(() => {
+    showSessionRangesRef.current = showSessionRanges;
+  }, [showSessionRanges]);
+
+  useEffect(() => {
+    showSmaRef.current = showSma;
+  }, [showSma]);
+
+  useEffect(() => {
+    sessionReferenceTimeRef.current = sessionReferenceTime;
+    activeSessionRef.current = activeSession;
+  }, [activeSession, sessionReferenceTime]);
 
   useEffect(() => {
     dataRef.current = data;
@@ -1123,7 +1192,13 @@ export default function Chart({
         return;
       }
 
-      const logicalRange = chart.timeScale().getVisibleLogicalRange();
+      const sessionRanges = sessionRangesRef.current;
+      if (sessionRanges.length === 0) {
+        return;
+      }
+
+      const timeScale = chart.timeScale();
+      const logicalRange = timeScale.getVisibleLogicalRange();
       if (!logicalRange) {
         return;
       }
@@ -1146,76 +1221,187 @@ export default function Chart({
       const panelTextColor = computedStyle.getPropertyValue("--panel-text").trim() || "#e5e7eb";
       const panelBackground = computedStyle.getPropertyValue("--panel-bg").trim() || "#0f172a";
 
-      const startDate = new Date(rangeStart * 1000);
-      startDate.setUTCHours(0, 0, 0, 0);
-      const endDate = new Date(rangeEnd * 1000);
-      endDate.setUTCHours(0, 0, 0, 0);
+      for (const sessionRange of sessionRanges) {
+        if (sessionRange.end <= rangeStart || sessionRange.start >= rangeEnd) {
+          continue;
+        }
 
-      for (
-        const day = new Date(startDate);
-        day.getTime() <= endDate.getTime();
-        day.setUTCDate(day.getUTCDate() + 1)
-      ) {
-        for (const session of SESSION_KEYS) {
-          const config = SESSION_CONFIG[session];
-          const sessionRange = getSessionRange(day, session);
+        const config = SESSION_CONFIG[sessionRange.type];
+        const sessionReferenceTime = sessionReferenceTimeRef.current;
+        const isCurrentSession =
+          activeSessionRef.current === sessionRange.type &&
+          typeof sessionReferenceTime === "number" &&
+          sessionReferenceTime >= sessionRange.start &&
+          sessionReferenceTime <= sessionRange.end;
+        const clippedStart = Math.max(sessionRange.start, rangeStart);
+        const clippedEnd = Math.min(sessionRange.end, rangeEnd);
+        const startCoordinate = timeScale.timeToCoordinate(clippedStart as UTCTimestamp);
+        const endCoordinate = timeScale.timeToCoordinate(clippedEnd as UTCTimestamp);
+        const startX =
+          startCoordinate === null
+            ? clippedStart <= rangeStart
+              ? 0
+              : viewportWidth
+            : (startCoordinate as unknown as number);
+        const endX =
+          endCoordinate === null
+            ? clippedEnd >= rangeEnd
+              ? viewportWidth
+              : 0
+            : (endCoordinate as unknown as number);
 
-          if (sessionRange.end <= rangeStart || sessionRange.start >= rangeEnd) {
-            continue;
+        const left = Math.max(0, Math.min(startX, endX));
+        const right = Math.min(viewportWidth, Math.max(startX, endX));
+        const width = right - left;
+
+        if (width <= 1) {
+          continue;
+        }
+
+        ctx.save();
+        ctx.fillStyle = isCurrentSession ? config.activeColor : config.color;
+        ctx.fillRect(left * dpr, 0, width * dpr, canvas.height);
+
+        if (width >= 48) {
+          const labelPaddingX = 6 * dpr;
+          ctx.font = `${10 * dpr}px sans-serif`;
+          const labelWidth = ctx.measureText(config.label).width + labelPaddingX * 2;
+          const maxLabelWidth = width * dpr - 8 * dpr;
+
+          if (maxLabelWidth > labelWidth) {
+            ctx.globalAlpha = 0.82;
+            ctx.fillStyle = panelBackground;
+            ctx.fillRect(left * dpr + 4 * dpr, 6 * dpr, labelWidth, 18 * dpr);
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = panelTextColor;
+            ctx.textBaseline = "middle";
+            ctx.fillText(
+              config.label,
+              left * dpr + 4 * dpr + labelPaddingX,
+              15 * dpr
+            );
           }
+        }
 
-          const startCoordinate = chart.timeScale().timeToCoordinate(
-            sessionRange.start as UTCTimestamp
-          );
-          const endCoordinate = chart.timeScale().timeToCoordinate(
-            sessionRange.end as UTCTimestamp
-          );
-          const startX =
-            startCoordinate === null
-              ? sessionRange.start < rangeStart
-                ? 0
-                : viewportWidth
-              : (startCoordinate as unknown as number);
-          const endX =
-            endCoordinate === null
-              ? sessionRange.end > rangeEnd
-                ? viewportWidth
-                : 0
-              : (endCoordinate as unknown as number);
+        ctx.restore();
+      }
+    },
+    []
+  );
 
-          const left = Math.max(0, Math.min(startX, endX));
-          const right = Math.min(viewportWidth, Math.max(startX, endX));
-          const width = right - left;
+  const drawSessionStructures = useCallback(
+    (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, dpr: number) => {
+      if (!showSessionLevelsRef.current && !showSessionRangesRef.current) {
+        return;
+      }
 
-          if (width <= 1) {
-            continue;
-          }
+      const chart = chartRef.current;
+      const series = seriesRef.current;
+      if (!chart || !series) {
+        return;
+      }
 
+      const visibleCandles = displayedDataRef.current;
+      if (visibleCandles.length === 0) {
+        return;
+      }
+
+      const sessionStats = sessionStatsRef.current;
+      if (sessionStats.length === 0) {
+        return;
+      }
+
+      const timeScale = chart.timeScale();
+      const logicalRange = timeScale.getVisibleLogicalRange();
+      if (!logicalRange) {
+        return;
+      }
+
+      const visibleFrom =
+        resolveTimeFromLogicalIndex(logicalRange.from, visibleCandles, timeframeRef.current) ??
+        (visibleCandles[0]?.time as UTCTimestamp | undefined);
+      const visibleTo =
+        resolveTimeFromLogicalIndex(logicalRange.to, visibleCandles, timeframeRef.current) ??
+        (visibleCandles[visibleCandles.length - 1]?.time as UTCTimestamp | undefined);
+
+      if (typeof visibleFrom !== "number" || typeof visibleTo !== "number") {
+        return;
+      }
+
+      const rangeStart = Math.min(visibleFrom, visibleTo);
+      const rangeEnd = Math.max(visibleFrom, visibleTo);
+      const viewportWidth = canvas.width / dpr;
+      const sessionReferenceTime = sessionReferenceTimeRef.current;
+      const activeSession = activeSessionRef.current;
+
+      for (const sessionStat of sessionStats) {
+        if (sessionStat.end <= rangeStart || sessionStat.start >= rangeEnd) {
+          continue;
+        }
+
+        const config = SESSION_CONFIG[sessionStat.type];
+        const clippedStart = Math.max(sessionStat.start, rangeStart);
+        const clippedEnd = Math.min(sessionStat.end, rangeEnd);
+        const startCoordinate = timeScale.timeToCoordinate(clippedStart as UTCTimestamp);
+        const endCoordinate = timeScale.timeToCoordinate(clippedEnd as UTCTimestamp);
+        const startX =
+          startCoordinate === null
+            ? clippedStart <= rangeStart
+              ? 0
+              : viewportWidth
+            : (startCoordinate as unknown as number);
+        const endX =
+          endCoordinate === null
+            ? clippedEnd >= rangeEnd
+              ? viewportWidth
+              : 0
+            : (endCoordinate as unknown as number);
+
+        const left = Math.max(0, Math.min(startX, endX));
+        const right = Math.min(viewportWidth, Math.max(startX, endX));
+        const width = right - left;
+
+        if (width <= 1) {
+          continue;
+        }
+
+        const highY = series.priceToCoordinate(sessionStat.high);
+        const lowY = series.priceToCoordinate(sessionStat.low);
+        if (highY === null || lowY === null) {
+          continue;
+        }
+
+        const top = Math.min(highY, lowY);
+        const bottom = Math.max(highY, lowY);
+        const height = bottom - top;
+        const lineRight = Math.min(viewportWidth, right + 18);
+        const isCurrentSession =
+          activeSession === sessionStat.type &&
+          typeof sessionReferenceTime === "number" &&
+          sessionReferenceTime >= sessionStat.start &&
+          sessionReferenceTime <= sessionStat.end;
+
+        if (showSessionRangesRef.current && height > 1) {
           ctx.save();
-          ctx.fillStyle = config.color;
-          ctx.fillRect(left * dpr, 0, width * dpr, canvas.height);
+          ctx.fillStyle = isCurrentSession ? config.activeRangeColor : config.rangeColor;
+          ctx.fillRect(left * dpr, top * dpr, width * dpr, height * dpr);
+          ctx.restore();
+        }
 
-          if (width >= 48) {
-            const labelPaddingX = 6 * dpr;
-            ctx.font = `${10 * dpr}px sans-serif`;
-            const labelWidth = ctx.measureText(config.label).width + labelPaddingX * 2;
-            const maxLabelWidth = width * dpr - 8 * dpr;
+        if (showSessionLevelsRef.current) {
+          ctx.save();
+          ctx.lineWidth = (isCurrentSession ? 1.5 : 1) * dpr;
+          ctx.strokeStyle = isCurrentSession ? config.activeLevelColor : config.levelColor;
 
-            if (maxLabelWidth > labelWidth) {
-              ctx.globalAlpha = 0.82;
-              ctx.fillStyle = panelBackground;
-              ctx.fillRect(left * dpr + 4 * dpr, 6 * dpr, labelWidth, 18 * dpr);
-              ctx.globalAlpha = 1;
-              ctx.fillStyle = panelTextColor;
-              ctx.textBaseline = "middle";
-              ctx.fillText(
-                config.label,
-                left * dpr + 4 * dpr + labelPaddingX,
-                15 * dpr
-              );
-            }
-          }
+          ctx.beginPath();
+          ctx.moveTo(left * dpr, highY * dpr);
+          ctx.lineTo(lineRight * dpr, highY * dpr);
+          ctx.stroke();
 
+          ctx.beginPath();
+          ctx.moveTo(left * dpr, lowY * dpr);
+          ctx.lineTo(lineRight * dpr, lowY * dpr);
+          ctx.stroke();
           ctx.restore();
         }
       }
@@ -1234,6 +1420,7 @@ export default function Chart({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     drawSessionOverlay(ctx, canvas, dpr);
+    drawSessionStructures(ctx, canvas, dpr);
 
     if (hiddenRef.current) {
       drawReplayOverlay(ctx, canvas, dpr);
@@ -1396,7 +1583,7 @@ export default function Chart({
     ctx.restore();
 
     drawReplayOverlay(ctx, canvas, dpr);
-  }, [drawReplayOverlay, drawSessionOverlay, pointToScreen]);
+  }, [drawReplayOverlay, drawSessionOverlay, drawSessionStructures, pointToScreen]);
 
   const scheduleOverlayDraw = useCallback(() => {
     if (overlayFrameRef.current !== null) return;
@@ -1587,6 +1774,12 @@ export default function Chart({
         borderDownColor: theme.candleDown,
         wickUpColor: theme.wickUp,
         wickDownColor: theme.wickDown,
+      });
+    }
+
+    if (smaSeriesRef.current) {
+      smaSeriesRef.current.applyOptions({
+        color: theme.accent,
       });
     }
 
@@ -1782,8 +1975,18 @@ export default function Chart({
       wickDownColor: theme.wickDown,
     });
 
+    const smaSeries = chart.addLineSeries({
+      color: theme.accent,
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+      visible: showSmaRef.current,
+    });
+
     chartRef.current = chart;
     seriesRef.current = series;
+    smaSeriesRef.current = smaSeries;
 
     const handleMouseDown = (event: MouseEvent) => {
       setActiveChart?.(chartId);
@@ -2206,6 +2409,7 @@ export default function Chart({
 
       if (chartRef.current === chart) chartRef.current = null;
       if (seriesRef.current === series) seriesRef.current = null;
+      if (smaSeriesRef.current === smaSeries) smaSeriesRef.current = null;
     };
   }, [
     chartId,
@@ -2230,7 +2434,7 @@ export default function Chart({
   ]);
 
   useEffect(() => {
-    if (!seriesRef.current || !chartRef.current) return;
+    if (!seriesRef.current || !chartRef.current || !smaSeriesRef.current) return;
 
     // LIVE DATA LEAK FIX: Prevent inactive charts from updating during independent replay
     try {
@@ -2262,13 +2466,55 @@ export default function Chart({
       const incrementalLiveCandle = shouldApplyReplay
         ? null
         : getIncrementalLiveCandle(displayedDataRef.current, displayData);
+      const normalizedSmaPeriod = sanitizeIndicatorPeriod(smaPeriod);
+      const previousSmaState = smaStateRef.current;
+      const smaStateChanged =
+        previousSmaState.enabled !== showSma ||
+        previousSmaState.period !== normalizedSmaPeriod;
+      smaStateRef.current = {
+        enabled: showSma,
+        period: normalizedSmaPeriod,
+      };
+      const incrementalSmaPoint =
+        shouldApplyReplay || smaStateChanged || !showSma
+          ? null
+          : getIncrementalSmaPoint(
+              displayedDataRef.current,
+              displayData,
+              normalizedSmaPeriod
+            );
 
       displayedDataRef.current = displayData;
+      sessionRangesRef.current = buildSessionRanges(displayData);
+      sessionStatsRef.current = buildSessionStats(displayData);
 
       if (incrementalLiveCandle) {
         seriesRef.current.update(toChartCandle(incrementalLiveCandle));
       } else {
         seriesRef.current.setData(displayData.map(toChartCandle));
+      }
+
+      smaSeriesRef.current.applyOptions({
+        visible: showSma,
+      });
+
+      if (!showSma) {
+        smaDataRef.current = [];
+        smaSeriesRef.current.setData([]);
+      } else if (incrementalSmaPoint) {
+        const nextSmaData = [...smaDataRef.current];
+        const previousPoint = nextSmaData[nextSmaData.length - 1];
+        if (previousPoint?.time === incrementalSmaPoint.time) {
+          nextSmaData[nextSmaData.length - 1] = incrementalSmaPoint;
+        } else {
+          nextSmaData.push(incrementalSmaPoint);
+        }
+        smaDataRef.current = nextSmaData;
+        smaSeriesRef.current.update(toLinePoint(incrementalSmaPoint));
+      } else {
+        const smaData = computeSma(displayData, { period: normalizedSmaPeriod });
+        smaDataRef.current = smaData;
+        smaSeriesRef.current.setData(smaData.map(toLinePoint));
       }
 
       if (!hasInitialData.current && displayData.length > 0) {
@@ -2307,6 +2553,8 @@ export default function Chart({
     replayIndex,
     replayStartTime,
     scheduleOverlayDraw,
+    showSma,
+    smaPeriod,
     symbol,
     timeframe,
   ]);
@@ -2317,7 +2565,7 @@ export default function Chart({
 
   useEffect(() => {
     scheduleOverlayDraw();
-  }, [scheduleOverlayDraw, showSessions]);
+  }, [scheduleOverlayDraw, showSessions, showSessionLevels, showSessionRanges]);
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
@@ -2383,11 +2631,46 @@ export default function Chart({
             <span>{formatReplayTime(replayCursorTime)}</span>
           </div>
 
+          {sessionContextVisible && activeSessionLabel && (
+            <div>
+              <span style={{ color: "var(--panel-muted)" }}>Session: </span>
+              <span>{activeSessionLabel}</span>
+            </div>
+          )}
+
           {isReplaySync && (
             <div style={{ color: "var(--panel-muted)", marginTop: "2px" }}>
               Sync: timestamp-linked
             </div>
           )}
+        </div>
+      )}
+
+      {!replayActiveForThisChart && sessionContextVisible && activeSessionLabel && (
+        <div
+          style={{
+            position: "absolute",
+            top: "8px",
+            right: "8px",
+            zIndex: 10,
+            pointerEvents: "none",
+            padding: "4px 10px",
+            borderRadius: "999px",
+            background:
+              activeSession === null
+                ? "rgba(100, 116, 139, 0.16)"
+                : SESSION_CONFIG[activeSession].activeColor,
+            border:
+              activeSession === null
+                ? "1px solid rgba(100, 116, 139, 0.24)"
+                : `1px solid ${SESSION_CONFIG[activeSession].levelColor}`,
+            color: "var(--panel-text)",
+            fontSize: "11px",
+            fontWeight: 600,
+            boxShadow: "0 6px 16px rgba(0,0,0,0.18)",
+          }}
+        >
+          Session: {activeSessionLabel}
         </div>
       )}
 

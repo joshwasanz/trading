@@ -1,7 +1,7 @@
 import { useThemeStore } from "../store/useThemeStore";
 import { useWorkspaceStore } from "../store/useWorkspaceStore";
 import { useLayoutState } from "../store/useLayoutState";
-import type { SessionKey } from "../types/sessions";
+import type { SessionKey } from "../utils/sessions";
 import type { Workspace } from "../types/workspace";
 import { formatReplayTime } from "../utils/replayDisplay";
 
@@ -35,6 +35,14 @@ type Props = {
   } | null;
   showSessions?: boolean;
   setShowSessions?: (showSessions: boolean) => void;
+  showSessionLevels?: boolean;
+  setShowSessionLevels?: (showSessionLevels: boolean) => void;
+  showSessionRanges?: boolean;
+  setShowSessionRanges?: (showSessionRanges: boolean) => void;
+  showSma?: boolean;
+  setShowSma?: (showSma: boolean) => void;
+  smaPeriod?: number;
+  setSmaPeriod?: (period: number) => void;
   jumpToSession?: (session: SessionKey) => void;
   canUndo?: boolean;
   canRedo?: boolean;
@@ -67,8 +75,16 @@ export default function TopBar({
   replayHistoryStatus = "idle",
   replayHistoryMessage = null,
   providerNotice = null,
-  showSessions = false,
+  showSessions = true,
   setShowSessions,
+  showSessionLevels = true,
+  setShowSessionLevels,
+  showSessionRanges = true,
+  setShowSessionRanges,
+  showSma = false,
+  setShowSma,
+  smaPeriod = 20,
+  setSmaPeriod,
   jumpToSession,
   canUndo = false,
   canRedo = false,
@@ -410,7 +426,11 @@ export default function TopBar({
         </div>
       )}
 
-      {(setShowSessions || jumpToSession) && (
+      {(setShowSessions ||
+        setShowSessionLevels ||
+        setShowSessionRanges ||
+        setShowSma ||
+        jumpToSession) && (
         <div style={{ display: "flex", gap: "4px", alignItems: "center", marginLeft: "12px" }}>
           <button
             onClick={() => setShowSessions?.(!showSessions)}
@@ -418,8 +438,76 @@ export default function TopBar({
             style={{ height: "28px", padding: "0 12px", fontSize: "12px" }}
             title={showSessions ? "Hide session overlays" : "Show session overlays"}
           >
-            Sessions
+            Sessions {showSessions ? "ON" : "OFF"}
           </button>
+
+          <button
+            onClick={() => setShowSessionLevels?.(!showSessionLevels)}
+            className={`ui-button ${showSessionLevels ? "ui-button--active" : ""}`}
+            style={{ height: "28px", padding: "0 12px", fontSize: "12px" }}
+            title={showSessionLevels ? "Hide session highs and lows" : "Show session highs and lows"}
+          >
+            Session H/L {showSessionLevels ? "ON" : "OFF"}
+          </button>
+
+          <button
+            onClick={() => setShowSessionRanges?.(!showSessionRanges)}
+            className={`ui-button ${showSessionRanges ? "ui-button--active" : ""}`}
+            style={{ height: "28px", padding: "0 12px", fontSize: "12px" }}
+            title={showSessionRanges ? "Hide session range boxes" : "Show session range boxes"}
+          >
+            Session Range {showSessionRanges ? "ON" : "OFF"}
+          </button>
+
+          <button
+            onClick={() => setShowSma?.(!showSma)}
+            className={`ui-button ${showSma ? "ui-button--active" : ""}`}
+            style={{ height: "28px", padding: "0 12px", fontSize: "12px" }}
+            title={showSma ? "Hide SMA overlay" : "Show SMA overlay"}
+          >
+            SMA {showSma ? "ON" : "OFF"}
+          </button>
+
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              height: "28px",
+              padding: "0 10px",
+              borderRadius: "8px",
+              border: "1px solid var(--panel-border)",
+              background: "var(--panel-bg-secondary)",
+              color: "var(--panel-text)",
+              fontSize: "12px",
+            }}
+            title="SMA period"
+          >
+            SMA P
+            <input
+              type="number"
+              min={2}
+              max={200}
+              step={1}
+              value={smaPeriod}
+              onChange={(event) => {
+                const nextValue = Number.parseInt(event.target.value, 10);
+                if (Number.isFinite(nextValue)) {
+                  setSmaPeriod?.(nextValue);
+                }
+              }}
+              style={{
+                width: "52px",
+                height: "20px",
+                borderRadius: "6px",
+                border: "1px solid var(--panel-border)",
+                background: "var(--panel-bg)",
+                color: "var(--panel-text)",
+                padding: "0 6px",
+                fontSize: "12px",
+              }}
+            />
+          </label>
 
           {showSessions && (
             <>

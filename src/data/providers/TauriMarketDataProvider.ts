@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Candle,
   HistoricalRequest,
+  ProviderCapabilities,
   SupportedSymbol,
   Timeframe,
 } from "../../types/marketData";
@@ -51,11 +52,67 @@ function normalizeSupportedSymbols(symbols: SupportedSymbol[]): SupportedSymbol[
   return normalized;
 }
 
+function normalizeSupportedTimeframes(timeframes: Timeframe[] | null | undefined): Timeframe[] {
+  const seen = new Set<Timeframe>();
+  const normalized: Timeframe[] = [];
+
+  for (const timeframe of timeframes ?? []) {
+    if (!SUPPORTED_TIMEFRAMES.includes(timeframe) || seen.has(timeframe)) {
+      continue;
+    }
+
+    seen.add(timeframe);
+    normalized.push(timeframe);
+  }
+
+  return normalized.length > 0 ? normalized : [...SUPPORTED_TIMEFRAMES];
+}
+
+function normalizeCapabilities(raw: ProviderCapabilities): ProviderCapabilities {
+  const supportedSymbols = normalizeSupportedSymbols(raw?.supportedSymbols ?? []);
+
+  return {
+    providerMode: raw?.providerMode === "twelve_data" ? "twelve_data" : "synthetic",
+    supportedSymbols,
+    supportedTimeframes: normalizeSupportedTimeframes(raw?.supportedTimeframes),
+    liveSupported: Boolean(raw?.liveSupported),
+    notice:
+      typeof raw?.notice === "string" && raw.notice.trim().length > 0 ? raw.notice.trim() : null,
+  };
+}
+
 export class TauriMarketDataProvider implements MarketDataProvider {
+  private capabilitiesCache: ProviderCapabilities | null = null;
   private supportedSymbolsCache: SupportedSymbol[] | null = null;
   private historicalCache = new Map<string, Candle[]>();
   private sharedSubscriptions = new Map<string, SharedLiveSubscription>();
   private nextConsumerId = 1;
+
+  async getCapabilities(): Promise<ProviderCapabilities> {
+    if (this.capabilitiesCache) {
+      return {
+        ...this.capabilitiesCache,
+        supportedSymbols: this.cloneSupportedSymbols(this.capabilitiesCache.supportedSymbols),
+        supportedTimeframes: [...this.capabilitiesCache.supportedTimeframes],
+      };
+    }
+
+    try {
+      const raw = await invoke<ProviderCapabilities>("get_provider_capabilities");
+      const normalized = normalizeCapabilities(raw);
+
+      this.capabilitiesCache = normalized;
+      this.supportedSymbolsCache = normalized.supportedSymbols;
+
+      return {
+        ...normalized,
+        supportedSymbols: this.cloneSupportedSymbols(normalized.supportedSymbols),
+        supportedTimeframes: [...normalized.supportedTimeframes],
+      };
+    } catch (error) {
+      throw createProviderError("getCapabilities failed", error);
+    }
+  }
 
   private async loadSupportedSymbols(): Promise<SupportedSymbol[]> {
     const rawSymbols = await invoke<SupportedSymbol[]>("get_supported_symbols");

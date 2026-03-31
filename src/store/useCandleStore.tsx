@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { Candle, Timeframe } from "../types/marketData";
+import { normalizeInstrumentId } from "../instruments";
 import {
   clearLegacyMarketDataCaches,
   sanitizeCachedCandleData,
@@ -23,7 +24,16 @@ function loadFromLocalStorage(): CandleData {
     clearLegacyMarketDataCaches(window.localStorage, LEGACY_STORAGE_KEYS);
     const cached = window.localStorage.getItem(STORAGE_KEY);
     if (cached) {
-      return sanitizeCachedCandleData(JSON.parse(cached));
+      return Object.entries(sanitizeCachedCandleData(JSON.parse(cached))).reduce<CandleData>(
+        (next, [symbol, series]) => {
+          next[normalizeInstrumentId(symbol)] = {
+            ...next[normalizeInstrumentId(symbol)],
+            ...series,
+          };
+          return next;
+        },
+        {}
+      );
     }
   } catch (error) {
     console.error("[CandleStore] Failed to load cache:", error);
