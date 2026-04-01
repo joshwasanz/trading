@@ -133,7 +133,10 @@ export default function ChartPanel({
           {symbolOptions.map((supportedSymbol) => (
             <button
               key={supportedSymbol.id}
-              onClick={() => onSymbolChange?.(supportedSymbol.id)}
+              onClick={() => {
+                setActiveChart?.(chartId);
+                onSymbolChange?.(supportedSymbol.id);
+              }}
               className={`ui-button ${symbol === supportedSymbol.id ? "ui-button--active" : ""}`}
               style={{ height: "24px", padding: "0 8px", fontSize: "11px" }}
               title={supportedSymbol.label}
@@ -148,7 +151,10 @@ export default function ChartPanel({
           {timeframeOptions.map((tf) => (
             <button
               key={tf}
-              onClick={() => onTimeframeChange?.(tf)}
+              onClick={() => {
+                setActiveChart?.(chartId);
+                onTimeframeChange?.(tf);
+              }}
               className={`ui-button ${timeframe === tf ? "ui-button--active" : ""}`}
               style={{ height: "24px", padding: "0 6px", fontSize: "11px" }}
             >

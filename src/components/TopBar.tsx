@@ -93,7 +93,14 @@ export default function TopBar({
   onRedo,
 }: Props) {
   const { mode, setMode, preset, setPreset } = useThemeStore();
-  const { workspaces, activeWorkspaceId, setActiveWorkspace, saveWorkspace } = useWorkspaceStore();
+  const {
+    workspaces,
+    activeWorkspaceId,
+    setActiveWorkspace,
+    saveWorkspace,
+    updateWorkspace,
+    deleteWorkspace,
+  } = useWorkspaceStore();
   const { panels, drawingsBySymbol } = useLayoutState();
   const replayReady = !isReplaySelectingStart && replayCursorTime !== null;
   const replayStartLabel = formatReplayTime(replayStartTime);
@@ -153,6 +160,15 @@ export default function TopBar({
         <button
           className="ui-button"
           onClick={() => {
+            if (activeWorkspaceId) {
+              updateWorkspace(activeWorkspaceId, {
+                layoutType,
+                panels,
+                drawingsBySymbol,
+              });
+              return;
+            }
+
             const name = prompt("Workspace name:", "My Workspace");
             if (!name) return;
 
@@ -167,21 +183,39 @@ export default function TopBar({
             };
 
             saveWorkspace(ws);
-            setActiveWorkspace(ws.id);
           }}
           title="Save current layout and drawings"
         >
           💾 Save
         </button>
 
+        <button
+          className="ui-button"
+          onClick={() => {
+            const name = prompt("Workspace name:", "My Workspace");
+            if (!name) return;
+
+            const ws: Workspace = {
+              id: crypto.randomUUID(),
+              name,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              layoutType,
+              panels,
+              drawingsBySymbol,
+            };
+
+            saveWorkspace(ws);
+          }}
+          title="Save current layout as a new workspace"
+        >
+          Save As
+        </button>
+
         {/* Load Workspace */}
         <select
           value={activeWorkspaceId || ""}
-          onChange={(e) => {
-            if (e.target.value) {
-              setActiveWorkspace(e.target.value);
-            }
-          }}
+          onChange={(e) => setActiveWorkspace(e.target.value || null)}
           className="ui-dropdown"
           title="Load a saved workspace"
         >
@@ -201,8 +235,7 @@ export default function TopBar({
               const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
               if (!workspace || !window.confirm(`Delete "${workspace.name}"?`)) return;
 
-              useWorkspaceStore.getState().deleteWorkspace(activeWorkspaceId);
-              setActiveWorkspace("");
+              deleteWorkspace(activeWorkspaceId);
             }}
             title="Delete current workspace"
           >

@@ -1,8 +1,23 @@
 import type { Candle, ProviderMode, Timeframe } from "../types/marketData";
+import {
+  sanitizeLatestWindowFetchMeta,
+  type LatestWindowFetchMeta,
+} from "./historyFreshness";
 
 export type CandleCacheData = Record<string, Partial<Record<Timeframe, Candle[]>>>;
+export type CandleCacheLatestFetches = Record<
+  string,
+  Partial<Record<Timeframe, LatestWindowFetchMeta>>
+>;
+
+type CandleCacheEnvelope = {
+  version: number;
+  data: CandleCacheData;
+  latestFetches: CandleCacheLatestFetches;
+};
 
 const TIMEFRAMES: Timeframe[] = ["15s", "1m", "3m"];
+const CACHE_VERSION = 1;
 
 function timeframeSeconds(timeframe: Timeframe): number {
   switch (timeframe) {
@@ -106,6 +121,37 @@ export function sanitizeCachedCandleData(value: unknown): CandleCacheData {
   return sanitized;
 }
 
+export function sanitizeLatestWindowFetches(value: unknown): CandleCacheLatestFetches {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const parsed = value as Record<string, unknown>;
+  const sanitized: CandleCacheLatestFetches = {};
+
+  for (const [symbol, maybeSeries] of Object.entries(parsed)) {
+    if (!maybeSeries || typeof maybeSeries !== "object" || Array.isArray(maybeSeries)) {
+      continue;
+    }
+
+    const series = maybeSeries as Record<string, unknown>;
+    const nextSeries: Partial<Record<Timeframe, LatestWindowFetchMeta>> = {};
+
+    for (const timeframe of TIMEFRAMES) {
+      const meta = sanitizeLatestWindowFetchMeta(series[timeframe]);
+      if (meta) {
+        nextSeries[timeframe] = meta;
+      }
+    }
+
+    if (Object.keys(nextSeries).length > 0) {
+      sanitized[symbol] = nextSeries;
+    }
+  }
+
+  return sanitized;
+}
+
 export function getScopedMarketDataStorageKey(baseKey: string, providerMode: ProviderMode) {
   return `${baseKey}:${providerMode}`;
 }
@@ -116,13 +162,42 @@ export function loadScopedCandleCache(
   legacyKeys: string[],
   providerMode: ProviderMode
 ): CandleCacheData {
+  return loadScopedCandleCacheEnvelope(storage, baseKey, legacyKeys, providerMode).data;
+}
+
+export function loadScopedCandleCacheEnvelope(
+  storage: Storage,
+  baseKey: string,
+  legacyKeys: string[],
+  providerMode: ProviderMode
+): CandleCacheEnvelope {
   clearLegacyMarketDataCaches(storage, legacyKeys);
   const cached = storage.getItem(getScopedMarketDataStorageKey(baseKey, providerMode));
   if (!cached) {
-    return {};
+    return {
+      version: CACHE_VERSION,
+      data: {},
+      latestFetches: {},
+    };
   }
 
-  return sanitizeCachedCandleData(JSON.parse(cached));
+  const parsed = JSON.parse(cached) as
+    | CandleCacheEnvelope
+    | CandleCacheData;
+
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "data" in parsed) {
+    return {
+      version: CACHE_VERSION,
+      data: sanitizeCachedCandleData(parsed.data),
+      latestFetches: sanitizeLatestWindowFetches(parsed.latestFetches),
+    };
+  }
+
+  return {
+    version: CACHE_VERSION,
+    data: sanitizeCachedCandleData(parsed),
+    latestFetches: {},
+  };
 }
 
 export function persistScopedCandleCache(
@@ -132,8 +207,31 @@ export function persistScopedCandleCache(
   providerMode: ProviderMode,
   data: CandleCacheData
 ) {
+  persistScopedCandleCacheEnvelope(storage, baseKey, legacyKeys, providerMode, {
+    data,
+    latestFetches: {},
+  });
+}
+
+export function persistScopedCandleCacheEnvelope(
+  storage: Storage,
+  baseKey: string,
+  legacyKeys: string[],
+  providerMode: ProviderMode,
+  envelope: {
+    data: CandleCacheData;
+    latestFetches: CandleCacheLatestFetches;
+  }
+) {
   clearLegacyMarketDataCaches(storage, legacyKeys);
-  storage.setItem(getScopedMarketDataStorageKey(baseKey, providerMode), JSON.stringify(data));
+  storage.setItem(
+    getScopedMarketDataStorageKey(baseKey, providerMode),
+    JSON.stringify({
+      version: CACHE_VERSION,
+      data: envelope.data,
+      latestFetches: envelope.latestFetches,
+    } satisfies CandleCacheEnvelope)
+  );
 }
 
 export function clearLegacyMarketDataCaches(storage: Storage, keys: string[]) {

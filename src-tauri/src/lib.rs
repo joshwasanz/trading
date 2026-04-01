@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::f64::consts::TAU;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::TcpStream;
@@ -28,6 +29,23 @@ static MASSIVE_FIRST_LIVE_MESSAGES: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 static MASSIVE_FIRST_EMITS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+static VERBOSE_LIVE_DEBUG: LazyLock<bool> = LazyLock::new(|| {
+    env::var("VERBOSE_LIVE_DEBUG")
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+});
+static SYNTHETIC_MODE_CONFIG: LazyLock<SyntheticMode> = LazyLock::new(|| {
+    let raw = env::var("SYNTHETIC_MODE")
+        .or_else(|_| env::var("DATA_PROVIDER"))
+        .unwrap_or_else(|_| "synthetic_dev".to_string())
+        .trim()
+        .to_ascii_lowercase();
+
+    match raw.as_str() {
+        "synthetic_chaos" | "synthetic-chaos" | "chaos" => SyntheticMode::Chaos,
+        _ => SyntheticMode::Dev,
+    }
+});
 
 #[derive(Debug, Clone, Copy)]
 struct SymbolState {
@@ -161,6 +179,49 @@ impl Timeframe {
 enum DataProviderMode {
     Synthetic,
     TwelveData,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyntheticMode {
+    Dev,
+    Chaos,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SyntheticProfile {
+    base_price: f64,
+    drift_per_bar: f64,
+    volatility: f64,
+    wick_factor: f64,
+    mean_reversion: f64,
+    burst_scale: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyntheticRegime {
+    GrindUp,
+    GrindDown,
+    Range,
+    BreakoutUp,
+    BreakoutDown,
+    Pullback,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SyntheticRegimeState {
+    regime: SyntheticRegime,
+    regime_id: u64,
+    phase: f64,
+    drift_bias: f64,
+    volatility_multiplier: f64,
+    noise_multiplier: f64,
+    wick_multiplier: f64,
+    mean_reversion_multiplier: f64,
+    direction: f64,
+    swing_period_bars: f64,
+    swing_amplitude_multiplier: f64,
+    swing_phase_offset: f64,
+    burst_multiplier: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -439,7 +500,23 @@ fn configured_data_provider() -> DataProviderMode {
         .as_str()
     {
         "twelve_data" | "twelvedata" | "twelve-data" => DataProviderMode::TwelveData,
+        "synthetic"
+        | "synthetic_dev"
+        | "synthetic-dev"
+        | "synthetic_chaos"
+        | "synthetic-chaos" => DataProviderMode::Synthetic,
         _ => DataProviderMode::Synthetic,
+    }
+}
+
+fn configured_synthetic_mode() -> SyntheticMode {
+    *SYNTHETIC_MODE_CONFIG
+}
+
+fn synthetic_mode_label() -> &'static str {
+    match configured_synthetic_mode() {
+        SyntheticMode::Dev => "synthetic_dev",
+        SyntheticMode::Chaos => "synthetic_chaos",
     }
 }
 
@@ -794,7 +871,7 @@ fn provider_capabilities() -> ProviderCapabilities {
         validation_mode: free_tier_validation_mode_enabled(),
         strict_realtime: strict_realtime_enabled(),
         live_source: Some(match configured_data_provider() {
-            DataProviderMode::Synthetic => "synthetic".to_string(),
+            DataProviderMode::Synthetic => synthetic_mode_label().to_string(),
             DataProviderMode::TwelveData => "real_poll".to_string(),
         }),
         poll_interval_ms: Some(twelve_data_live_poll_interval().as_millis() as u64),
@@ -828,6 +905,10 @@ fn runtime_debug_log(scope: &str, payload: impl AsRef<str>) {
     append_frontend_debug_log_line(&format!("[runtime:{scope}] {}", payload.as_ref()));
 }
 
+fn verbose_live_debug_enabled() -> bool {
+    *VERBOSE_LIVE_DEBUG
+}
+
 fn emit_provider_status<R: Runtime>(
     app: &AppHandle<R>,
     kind: &str,
@@ -853,19 +934,109 @@ fn massive_api_key() -> Result<String, String> {
     twelve_data_api_key()
 }
 
-fn base_price_for_symbol(symbol: &str) -> f64 {
+fn base_synthetic_profile(symbol: &str) -> SyntheticProfile {
     match symbol {
-        "eurusd" => 1.08,
-        "gbpusd" => 1.27,
-        "usdjpy" => 149.0,
-        "usdchf" => 0.91,
-        "audusd" => 0.66,
-        "usdcad" => 1.35,
-        "spx" => 5_200.0,
-        "ndx" => 18_100.0,
-        "dji" => 39_000.0,
-        _ => 1_000.0,
+        "ndx" => SyntheticProfile {
+            base_price: 18_000.0,
+            drift_per_bar: 1.8,
+            volatility: 14.0,
+            wick_factor: 0.45,
+            mean_reversion: 0.08,
+            burst_scale: 0.90,
+        },
+        "spx" => SyntheticProfile {
+            base_price: 5_000.0,
+            drift_per_bar: 0.45,
+            volatility: 4.2,
+            wick_factor: 0.42,
+            mean_reversion: 0.08,
+            burst_scale: 0.72,
+        },
+        "eurusd" => SyntheticProfile {
+            base_price: 1.1600,
+            drift_per_bar: 0.00003,
+            volatility: 0.00055,
+            wick_factor: 0.55,
+            mean_reversion: 0.12,
+            burst_scale: 0.75,
+        },
+        "usdjpy" => SyntheticProfile {
+            base_price: 155.0,
+            drift_per_bar: 0.01,
+            volatility: 0.08,
+            wick_factor: 0.50,
+            mean_reversion: 0.10,
+            burst_scale: 0.82,
+        },
+        "gbpusd" => SyntheticProfile {
+            base_price: 1.2800,
+            drift_per_bar: 0.00004,
+            volatility: 0.00075,
+            wick_factor: 0.60,
+            mean_reversion: 0.12,
+            burst_scale: 0.90,
+        },
+        "dji" => SyntheticProfile {
+            base_price: 39_000.0,
+            drift_per_bar: 3.5,
+            volatility: 24.0,
+            wick_factor: 0.45,
+            mean_reversion: 0.07,
+            burst_scale: 0.95,
+        },
+        "usdchf" => SyntheticProfile {
+            base_price: 0.9100,
+            drift_per_bar: 0.00002,
+            volatility: 0.00045,
+            wick_factor: 0.52,
+            mean_reversion: 0.12,
+            burst_scale: 0.70,
+        },
+        "audusd" => SyntheticProfile {
+            base_price: 0.6600,
+            drift_per_bar: 0.00003,
+            volatility: 0.00050,
+            wick_factor: 0.52,
+            mean_reversion: 0.12,
+            burst_scale: 0.72,
+        },
+        "usdcad" => SyntheticProfile {
+            base_price: 1.3500,
+            drift_per_bar: 0.00003,
+            volatility: 0.00065,
+            wick_factor: 0.54,
+            mean_reversion: 0.11,
+            burst_scale: 0.76,
+        },
+        _ => SyntheticProfile {
+            base_price: 100.0,
+            drift_per_bar: 0.05,
+            volatility: 0.8,
+            wick_factor: 0.50,
+            mean_reversion: 0.10,
+            burst_scale: 0.70,
+        },
     }
+}
+
+fn synthetic_profile(symbol: &str) -> SyntheticProfile {
+    let base = base_synthetic_profile(symbol);
+
+    match configured_synthetic_mode() {
+        SyntheticMode::Dev => base,
+        SyntheticMode::Chaos => SyntheticProfile {
+            base_price: base.base_price,
+            drift_per_bar: base.drift_per_bar * 0.95,
+            volatility: base.volatility * 1.65,
+            wick_factor: (base.wick_factor * 1.15).min(0.9),
+            mean_reversion: base.mean_reversion * 0.85,
+            burst_scale: base.burst_scale * 1.45,
+        },
+    }
+}
+
+fn base_price_for_symbol(symbol: &str) -> f64 {
+    synthetic_profile(symbol).base_price
 }
 
 fn symbol_seed(symbol: &str) -> u64 {
@@ -929,25 +1100,373 @@ fn current_timestamp_millis() -> u64 {
 }
 
 fn base_tick_volatility(symbol: &str) -> f64 {
-    match symbol {
-        "eurusd" => 0.0007,
-        "gbpusd" => 0.0008,
-        "usdjpy" => 0.06,
-        "usdchf" => 0.0007,
-        "audusd" => 0.0007,
-        "usdcad" => 0.0008,
-        "spx" => 0.9,
-        "ndx" => 1.8,
-        "dji" => 2.5,
-        _ => 0.08,
-    }
+    synthetic_profile(symbol).volatility
 }
 
 fn timeframe_noise_scale(timeframe: Timeframe) -> f64 {
     match timeframe {
-        Timeframe::S15 => 1.0,
-        Timeframe::M1 => 1.9,
-        Timeframe::M3 => 3.2,
+        Timeframe::S15 => 0.55,
+        Timeframe::M1 => 0.9,
+        Timeframe::M3 => 1.25,
+    }
+}
+
+fn synthetic_session_activity(timestamp_secs: u64) -> f64 {
+    let hour = (timestamp_secs / 3_600) % 24;
+
+    match hour {
+        7..=10 => 1.10,
+        13..=16 => 1.18,
+        0..=3 => 0.72,
+        _ => 0.90,
+    }
+}
+
+fn synthetic_noise_scale(symbol: &str) -> f64 {
+    match symbol {
+        "ndx" => 0.28,
+        "spx" => 0.18,
+        "eurusd" => 0.11,
+        "usdjpy" => 0.15,
+        "gbpusd" => 0.14,
+        "dji" => 0.32,
+        _ => 0.18,
+    }
+}
+
+fn synthetic_swing_amplitude(symbol: &str) -> f64 {
+    match symbol {
+        "ndx" => 6.0,
+        "spx" => 1.6,
+        "eurusd" => 0.00016,
+        "usdjpy" => 0.022,
+        "gbpusd" => 0.00020,
+        "dji" => 10.0,
+        _ => 0.35,
+    }
+}
+
+fn synthetic_swing_period_bars(symbol: &str, timeframe: Timeframe) -> f64 {
+    let base_period = match symbol {
+        "ndx" => 44.0,
+        "spx" => 58.0,
+        "eurusd" => 76.0,
+        "usdjpy" => 60.0,
+        "gbpusd" => 68.0,
+        "dji" => 40.0,
+        _ => 52.0,
+    };
+
+    base_period
+        * match timeframe {
+            Timeframe::S15 => 0.85,
+            Timeframe::M1 => 1.0,
+            Timeframe::M3 => 1.40,
+        }
+}
+
+fn synthetic_session_directional_bias(
+    symbol: &str,
+    timeframe: Timeframe,
+    timestamp_secs: u64,
+    profile: SyntheticProfile,
+) -> f64 {
+    let hour = (timestamp_secs / 3_600) % 24;
+    let bias_scale = match hour {
+        7..=10 => 0.08,
+        13..=16 => 0.12,
+        0..=3 => 0.02,
+        _ => 0.03,
+    };
+
+    deterministic_signed(symbol, timeframe, timestamp_secs / 3_600, 41)
+        * profile.volatility
+        * bias_scale
+}
+
+fn synthetic_regime_state(
+    symbol: &str,
+    timeframe: Timeframe,
+    timestamp_secs: u64,
+    _profile: SyntheticProfile,
+) -> SyntheticRegimeState {
+    let aligned_time = align_timestamp(timestamp_secs, timeframe);
+    let bar_index = aligned_time / timeframe.duration();
+    let cycle_span = 228_u64;
+    let cycle_id = bar_index / cycle_span;
+    let cycle_offset = bar_index % cycle_span;
+    let first_regime_len = 48 + (deterministic_hash(symbol, timeframe, cycle_id, 131) % 49);
+    let remaining_after_first = cycle_span.saturating_sub(first_regime_len);
+    let second_max = remaining_after_first.saturating_sub(44).min(84);
+    let second_span = second_max.saturating_sub(40) + 1;
+    let second_regime_len = 40 + (deterministic_hash(symbol, timeframe, cycle_id, 132) % second_span.max(1));
+    let third_regime_len = cycle_span
+        .saturating_sub(first_regime_len)
+        .saturating_sub(second_regime_len)
+        .max(40);
+    let (cycle_slot, regime_id, local_offset, regime_len) = if cycle_offset < first_regime_len {
+        (0_u64, cycle_id * 3, cycle_offset, first_regime_len)
+    } else {
+        let second_boundary = first_regime_len + second_regime_len;
+        if cycle_offset < second_boundary {
+            (
+                1_u64,
+                cycle_id * 3 + 1,
+                cycle_offset - first_regime_len,
+                second_regime_len.max(1),
+            )
+        } else {
+            (
+                2_u64,
+                cycle_id * 3 + 2,
+                cycle_offset - second_boundary,
+                third_regime_len.max(1),
+            )
+        }
+    };
+    let phase = if regime_len <= 1 {
+        0.0
+    } else {
+        local_offset as f64 / (regime_len - 1) as f64
+    };
+    let cycle_trend_sign = if deterministic_signed(symbol, timeframe, cycle_id, 133) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    let selector = deterministic_hash(symbol, timeframe, regime_id, 134) % 4;
+    let strength = 0.55 + deterministic_signed(symbol, timeframe, regime_id, 135).abs() * 0.60;
+    let swing_period_bars = synthetic_swing_period_bars(symbol, timeframe)
+        * (0.90 + deterministic_signed(symbol, timeframe, regime_id, 136).abs() * 0.65)
+        * match cycle_slot {
+            0 => 1.0,
+            1 => 0.82,
+            _ => 1.18,
+        };
+    let swing_amplitude_multiplier = (0.18
+        + deterministic_signed(symbol, timeframe, regime_id, 137).abs() * 0.28)
+        * match cycle_slot {
+            1 => 0.75,
+            _ => 1.0,
+        };
+    let swing_phase_offset =
+        deterministic_hash(symbol, timeframe, regime_id, 138) as f64 / u64::MAX as f64 * TAU;
+    let burst_multiplier = 0.75 + deterministic_signed(symbol, timeframe, regime_id, 139).abs() * 0.40;
+
+    let (regime, drift_bias, volatility_multiplier, noise_multiplier, wick_multiplier, mean_reversion_multiplier, direction) =
+        match cycle_slot {
+            0 => match selector {
+                0 => (
+                    if cycle_trend_sign > 0.0 {
+                        SyntheticRegime::GrindUp
+                    } else {
+                        SyntheticRegime::GrindDown
+                    },
+                    cycle_trend_sign * 0.58 * strength,
+                    0.88,
+                    0.60,
+                    0.66,
+                    0.60,
+                    cycle_trend_sign,
+                ),
+                1 => (
+                    SyntheticRegime::Range,
+                    cycle_trend_sign * 0.10 * strength,
+                    0.58,
+                    0.44,
+                    0.52,
+                    1.24,
+                    cycle_trend_sign,
+                ),
+                _ => (
+                    if cycle_trend_sign > 0.0 {
+                        SyntheticRegime::BreakoutUp
+                    } else {
+                        SyntheticRegime::BreakoutDown
+                    },
+                    cycle_trend_sign * 0.88 * strength,
+                    1.02,
+                    0.50,
+                    0.60,
+                    0.34,
+                    cycle_trend_sign,
+                ),
+            },
+            1 => match selector {
+                0 | 1 => (
+                    SyntheticRegime::Pullback,
+                    -cycle_trend_sign * 0.34 * strength,
+                    0.74,
+                    0.34,
+                    0.48,
+                    0.86,
+                    -cycle_trend_sign,
+                ),
+                2 => (
+                    SyntheticRegime::Range,
+                    0.0,
+                    0.56,
+                    0.38,
+                    0.48,
+                    1.34,
+                    cycle_trend_sign,
+                ),
+                _ => (
+                    if cycle_trend_sign > 0.0 {
+                        SyntheticRegime::GrindDown
+                    } else {
+                        SyntheticRegime::GrindUp
+                    },
+                    -cycle_trend_sign * 0.24 * strength,
+                    0.72,
+                    0.36,
+                    0.50,
+                    0.98,
+                    -cycle_trend_sign,
+                ),
+            },
+            _ => match selector {
+                0 => (
+                    if cycle_trend_sign > 0.0 {
+                        SyntheticRegime::GrindUp
+                    } else {
+                        SyntheticRegime::GrindDown
+                    },
+                    cycle_trend_sign * 0.62 * strength,
+                    0.86,
+                    0.52,
+                    0.58,
+                    0.62,
+                    cycle_trend_sign,
+                ),
+                1 | 2 => (
+                    if cycle_trend_sign > 0.0 {
+                        SyntheticRegime::BreakoutUp
+                    } else {
+                        SyntheticRegime::BreakoutDown
+                    },
+                    cycle_trend_sign * 0.96 * strength,
+                    1.10,
+                    0.48,
+                    0.56,
+                    0.28,
+                    cycle_trend_sign,
+                ),
+                _ => (
+                    SyntheticRegime::Range,
+                    cycle_trend_sign * 0.06 * strength,
+                    0.54,
+                    0.36,
+                    0.46,
+                    1.28,
+                    cycle_trend_sign,
+                ),
+            },
+        };
+
+    SyntheticRegimeState {
+        regime,
+        regime_id,
+        phase,
+        drift_bias,
+        volatility_multiplier,
+        noise_multiplier,
+        wick_multiplier,
+        mean_reversion_multiplier,
+        direction,
+        swing_period_bars,
+        swing_amplitude_multiplier,
+        swing_phase_offset,
+        burst_multiplier,
+    }
+}
+
+fn synthetic_swing_drift(period_bars: f64, bar_index: u64, amplitude: f64, phase_offset: f64) -> f64 {
+    let period = period_bars.max(18.0);
+    let current_x = (bar_index as f64 / period) * TAU + phase_offset;
+    let previous_x = (bar_index.saturating_sub(1) as f64 / period) * TAU + phase_offset;
+    let current = current_x.sin() + (current_x * 0.61 + phase_offset * 0.35).sin() * 0.18;
+    let previous = previous_x.sin() + (previous_x * 0.61 + phase_offset * 0.35).sin() * 0.18;
+
+    amplitude * (current - previous)
+}
+
+fn synthetic_momentum_burst(
+    symbol: &str,
+    timeframe: Timeframe,
+    timestamp_secs: u64,
+    profile: SyntheticProfile,
+    regime_state: SyntheticRegimeState,
+) -> f64 {
+    let aligned_time = align_timestamp(timestamp_secs, timeframe);
+    let bar_index = aligned_time / timeframe.duration();
+    let burst_window = match configured_synthetic_mode() {
+        SyntheticMode::Dev => 28_u64,
+        SyntheticMode::Chaos => 20_u64,
+    };
+    let burst_id = bar_index / burst_window;
+    let trigger = deterministic_signed(symbol, timeframe, burst_id, 151);
+    let threshold = match configured_synthetic_mode() {
+        SyntheticMode::Dev => 0.968,
+        SyntheticMode::Chaos => 0.90,
+    };
+
+    let regime_allows_burst = matches!(
+        regime_state.regime,
+        SyntheticRegime::BreakoutUp
+            | SyntheticRegime::BreakoutDown
+            | SyntheticRegime::GrindUp
+            | SyntheticRegime::GrindDown
+    );
+    if !regime_allows_burst || trigger.abs() < threshold {
+        return 0.0;
+    }
+
+    let burst_length = 4 + (deterministic_hash(symbol, timeframe, burst_id, 152) % 9);
+    let burst_phase = bar_index % burst_window;
+    if burst_phase >= burst_length {
+        return 0.0;
+    }
+
+    let phase = if burst_length <= 1 {
+        0.0
+    } else {
+        burst_phase as f64 / (burst_length - 1) as f64
+    };
+    let envelope = if phase <= 0.25 {
+        0.80 + phase * 0.90
+    } else if phase <= 0.70 {
+        1.02 - (phase - 0.25) * 0.28
+    } else {
+        0.90 - (phase - 0.70) * 1.25
+    };
+
+    regime_state.direction
+        * profile.volatility
+        * profile.burst_scale
+        * regime_state.burst_multiplier
+        * 0.70
+        * envelope.max(0.0)
+}
+
+fn synthetic_wick_event_scale(symbol: &str, timeframe: Timeframe, timestamp_secs: u64) -> f64 {
+    let aligned_time = align_timestamp(timestamp_secs, timeframe);
+    let bar_index = aligned_time / timeframe.duration();
+    let spike = deterministic_signed(symbol, timeframe, bar_index / 12, 161).abs();
+
+    if spike > 0.975 {
+        1.35
+    } else if spike > 0.94 {
+        1.12
+    } else {
+        1.0
+    }
+}
+
+fn synthetic_live_tick_interval_ms() -> u64 {
+    match configured_synthetic_mode() {
+        SyntheticMode::Dev => 250,
+        SyntheticMode::Chaos => 120,
     }
 }
 
@@ -955,24 +1474,59 @@ fn market_anchor_price(symbol: &str, time_secs: u64) -> f64 {
     let base = base_price_for_symbol(symbol);
     let offset = (symbol_seed(symbol) % 3_600) as f64;
     let t = time_secs as f64 + offset;
-    let slow_trend = (t / 5_400.0).sin() * base * 0.0011;
-    let medium_cycle = (t / 1_200.0).cos() * base * 0.00065;
-    let longer_bias = (t / 21_600.0).sin() * base * 0.0018;
+    let slow_trend = (t / 10_800.0).sin() * base * 0.0011;
+    let medium_cycle = (t / 3_600.0).cos() * base * 0.00055;
+    let longer_bias = (t / 28_800.0).sin() * base * 0.00175;
 
     base + slow_trend + medium_cycle + longer_bias
 }
 
 fn evolve_live_price(symbol: &str, time_millis: u64, previous_price: f64) -> f64 {
     let time_secs = time_millis / 1_000;
+    let profile = synthetic_profile(symbol);
+    let regime_state = synthetic_regime_state(symbol, Timeframe::S15, time_secs, profile);
     let anchor = market_anchor_price(symbol, time_secs);
-    let volatility = base_tick_volatility(symbol);
-    let pull = (anchor - previous_price) * 0.08;
-    let micro =
-        deterministic_signed(symbol, Timeframe::S15, time_millis / 250, 91) * volatility * 0.65;
-    let momentum =
-        deterministic_signed(symbol, Timeframe::S15, time_millis / 500, 92) * volatility * 0.25;
+    let activity = synthetic_session_activity(time_secs);
+    let bar_index = align_timestamp(time_secs, Timeframe::S15) / Timeframe::S15.duration();
+    let regime_envelope = match regime_state.regime {
+        SyntheticRegime::BreakoutUp | SyntheticRegime::BreakoutDown => {
+            0.85 + (1.0 - (regime_state.phase - 0.28).abs() * 1.65).max(0.0) * 0.7
+        }
+        SyntheticRegime::Pullback => 0.95 - regime_state.phase * 0.35,
+        SyntheticRegime::Range => 0.35 + ((regime_state.phase * TAU).sin().abs() * 0.12),
+        _ => 0.72 + ((regime_state.phase * TAU).sin().abs() * 0.22),
+    };
+    let pull = (anchor - previous_price)
+        * (profile.mean_reversion * regime_state.mean_reversion_multiplier * 0.025);
+    let bar_swing = synthetic_swing_drift(
+        regime_state.swing_period_bars * 0.65,
+        bar_index,
+        synthetic_swing_amplitude(symbol) * regime_state.swing_amplitude_multiplier * 0.08,
+        regime_state.swing_phase_offset,
+    );
+    let structural_bias = deterministic_signed(symbol, Timeframe::S15, bar_index / 10, 171)
+        * profile.volatility
+        * 0.010
+        * regime_state.noise_multiplier;
+    let drift = profile.drift_per_bar * regime_state.drift_bias * regime_envelope * 0.015
+        + synthetic_session_directional_bias(symbol, Timeframe::S15, time_secs, profile) * 0.04
+        + synthetic_momentum_burst(symbol, Timeframe::S15, time_secs, profile, regime_state) * 0.05
+        + bar_swing * 0.08
+        + structural_bias;
+    let micro = deterministic_signed(symbol, Timeframe::S15, time_millis / 250, 91)
+        * profile.volatility
+        * synthetic_noise_scale(symbol)
+        * regime_state.noise_multiplier
+        * 0.008
+        * activity;
+    let momentum = deterministic_signed(symbol, Timeframe::S15, time_millis / 500, 92)
+        * profile.volatility
+        * synthetic_noise_scale(symbol)
+        * regime_state.noise_multiplier
+        * 0.003
+        * activity;
 
-    (previous_price + pull + micro + momentum).max(1.0)
+    (previous_price + drift + pull + micro + momentum).max(0.00001)
 }
 
 fn emit_candle<R: Runtime>(
@@ -1166,6 +1720,18 @@ fn emit_twelve_data_live_candles<R: Runtime>(
 
         if should_emit {
             store_symbol_state(symbol, candle.time, candle.close);
+            if verbose_live_debug_enabled() {
+                runtime_debug_log(
+                    "live_emit",
+                    format!(
+                        "provider=twelve_data symbol={} timeframe={} time={} close={}",
+                        symbol,
+                        timeframe.as_str(),
+                        candle.time,
+                        candle.close
+                    ),
+                );
+            }
             let _ = emit_candle(app, symbol, timeframe, candle);
         }
 
@@ -1270,6 +1836,7 @@ fn start_twelve_data_poll_stream<R: Runtime>(
         let poll_interval = twelve_data_live_poll_interval();
         let mut last_seen = HashMap::<u64, Candle>::new();
         let mut pending_initial = Some(initial_candles);
+        let mut had_poll_error = false;
 
         println!(
             "[twelve_data] live poll started symbol={} timeframe={} source=real_poll interval_ms={}",
@@ -1297,6 +1864,17 @@ fn start_twelve_data_poll_stream<R: Runtime>(
                         &candles,
                         &mut last_seen,
                     );
+                    if had_poll_error {
+                        let _ = emit_provider_status(
+                            &app,
+                            "info",
+                            "live_poll",
+                            Some(&symbol),
+                            Some(timeframe),
+                            "Live poll recovered.",
+                        );
+                        had_poll_error = false;
+                    }
                     poll_interval
                 }
                 Err(error) => {
@@ -1314,6 +1892,7 @@ fn start_twelve_data_poll_stream<R: Runtime>(
                         Some(timeframe),
                         &error,
                     );
+                    had_poll_error = true;
                     Duration::from_secs(10)
                 }
             };
@@ -1418,6 +1997,16 @@ fn subscribe_twelve_data_live(
         symbol,
         timeframe.as_str()
     );
+    if verbose_live_debug_enabled() {
+        runtime_debug_log(
+            "live_subscribe",
+            format!(
+                "provider=twelve_data source=real_poll symbol={} timeframe={}",
+                symbol,
+                timeframe.as_str()
+            ),
+        );
+    }
 
     {
         let mut subscriptions = LIVE_SUBSCRIPTIONS
@@ -1612,7 +2201,7 @@ fn start_synthetic_symbol_stream<R: Runtime>(
                 }
             }
 
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(synthetic_live_tick_interval_ms()));
         }
 
         if let Ok(mut symbol_streams) = SYNTHETIC_SYMBOL_STREAMS.lock() {
@@ -1634,20 +2223,73 @@ fn generate_synthetic_candle(
     time: u64,
     previous_close: f64,
 ) -> Candle {
+    let profile = synthetic_profile(symbol);
+    let regime_state = synthetic_regime_state(symbol, timeframe, time, profile);
+    let bar_index = align_timestamp(time, timeframe) / timeframe.duration();
     let anchor = market_anchor_price(symbol, time);
-    let volatility = base_tick_volatility(symbol) * timeframe_noise_scale(timeframe) * 4.0;
-    let pull = (anchor - previous_close) * 0.24;
-    let impulse = deterministic_signed(symbol, timeframe, time, 1) * volatility;
-    let mean_reversion = deterministic_signed(symbol, timeframe, time, 2) * volatility * 0.35;
-    let secondary = deterministic_signed(symbol, timeframe, time, 3) * volatility * 0.18;
-    let open = previous_close;
-    let close = (previous_close + pull + impulse + mean_reversion + secondary).max(1.0);
+    let activity = synthetic_session_activity(time);
+    let volatility = base_tick_volatility(symbol)
+        * timeframe_noise_scale(timeframe)
+        * activity
+        * regime_state.volatility_multiplier;
+    let regime_envelope = match regime_state.regime {
+        SyntheticRegime::BreakoutUp | SyntheticRegime::BreakoutDown => {
+            1.02 + (1.0 - (regime_state.phase - 0.18).abs() * 2.1).max(0.0) * 0.34
+        }
+        SyntheticRegime::Pullback => 0.66 - regime_state.phase * 0.16,
+        SyntheticRegime::Range => 0.14 + deterministic_signed(symbol, timeframe, regime_state.regime_id, 173).abs() * 0.10,
+        SyntheticRegime::GrindUp => 0.78 + regime_state.phase * 0.18,
+        SyntheticRegime::GrindDown => 0.86 + (1.0 - regime_state.phase) * 0.22,
+    };
+    let baseline_drift = profile.drift_per_bar * regime_state.drift_bias * regime_envelope;
+    let session_bias = synthetic_session_directional_bias(symbol, timeframe, time, profile);
+    let momentum_burst = synthetic_momentum_burst(symbol, timeframe, time, profile, regime_state);
+    let swing_component = synthetic_swing_drift(
+        regime_state.swing_period_bars,
+        bar_index,
+        synthetic_swing_amplitude(symbol)
+            * regime_state.swing_amplitude_multiplier
+            * regime_state.volatility_multiplier,
+        regime_state.swing_phase_offset,
+    );
+    let pullback =
+        (anchor - previous_close) * profile.mean_reversion * regime_state.mean_reversion_multiplier;
+    let structural_noise = deterministic_signed(symbol, timeframe, bar_index / 8, 174)
+        * volatility
+        * 0.09
+        * regime_state.noise_multiplier;
+    let controlled_noise = deterministic_signed(symbol, timeframe, time, 1)
+        * volatility
+        * synthetic_noise_scale(symbol)
+        * regime_state.noise_multiplier
+        * 0.75;
+    let secondary_noise = deterministic_signed(symbol, timeframe, time, 2)
+        * volatility
+        * 0.07
+        * regime_state.noise_multiplier;
+    let open = previous_close.max(0.00001);
+    let close = (open
+        + baseline_drift
+        + swing_component
+        + session_bias
+        + momentum_burst
+        + pullback
+        + structural_noise
+        + controlled_noise
+        + secondary_noise)
+        .max(0.00001);
+    let wick_scale = volatility
+        * profile.wick_factor
+        * regime_state.wick_multiplier
+        * synthetic_wick_event_scale(symbol, timeframe, time)
+        * 0.48;
+    let min_wick = (profile.base_price * 0.00002).max(profile.volatility * 0.04);
     let upper_wick =
-        deterministic_signed(symbol, timeframe, time, 4).abs() * volatility * 0.7 + 0.15;
+        min_wick + deterministic_signed(symbol, timeframe, time, 4).abs() * wick_scale;
     let lower_wick =
-        deterministic_signed(symbol, timeframe, time, 5).abs() * volatility * 0.7 + 0.15;
+        min_wick + deterministic_signed(symbol, timeframe, time, 5).abs() * wick_scale;
     let high = open.max(close) + upper_wick;
-    let low = open.min(close) - lower_wick;
+    let low = (open.min(close) - lower_wick).max(0.00001);
 
     Candle {
         symbol: symbol.to_string(),
@@ -1685,7 +2327,7 @@ fn generate_synthetic_historical_candles(
     let actual_count = total_candles_in_range.min(requested_limit);
     let first_time =
         effective_to.saturating_sub((actual_count as u64).saturating_sub(1).saturating_mul(step));
-    let warmup_steps = 50usize;
+    let warmup_steps = 120usize;
     let warmup_start = first_time.saturating_sub((warmup_steps as u64).saturating_mul(step));
     let mut price = base_price_for_symbol(symbol);
     let mut warmup_time = warmup_start;
@@ -2802,7 +3444,10 @@ pub fn run() {
 
     match configured_data_provider() {
         DataProviderMode::Synthetic => {
-            println!("[data] startup provider=synthetic");
+            println!(
+                "[data] startup provider=synthetic mode={}",
+                synthetic_mode_label()
+            );
         }
         DataProviderMode::TwelveData => {
             if free_tier_validation_mode_enabled() {

@@ -14,7 +14,6 @@ import {
 } from "lightweight-charts";
 import { useToolStore } from "./store/useToolStore";
 import { useThemeStore } from "./store/useThemeStore";
-import { useCandleStore } from "./store/useCandleStore";
 import DrawingStylePanel from "./components/DrawingStylePanel";
 import type { Candle, HistoryUiState } from "./types/marketData";
 import type { ReplayStartPayload } from "./types/replay";
@@ -544,7 +543,6 @@ export default function Chart({
     enabled: showSma,
     period: sanitizeIndicatorPeriod(smaPeriod),
   });
-  const candleStoreDataRef = useRef<Record<string, Record<string, Candle[]>>>({});
   const dataRef = useRef(data);
   const displayedDataRef = useRef<Candle[]>(data);
   const sessionRangesRef = useRef<SessionRange[]>([]);
@@ -575,11 +573,11 @@ export default function Chart({
 
   const setTool = useToolStore((state) => state.setTool);
   const { theme } = useThemeStore();
-  const candleStoreData = useCandleStore((state) => state.data);
+  const themeRef = useRef(theme);
   const [drawingStep, setDrawingStep] = useState<"none" | "started">("none");
   const [selectedDrawing, setSelectedDrawing] = useState<DrawingSelection | null>(null);
   const [chartReady, setChartReady] = useState(false);
-  const fullData: Candle[] = data.length > 0 ? data : candleStoreData[symbol]?.[timeframe] ?? [];
+  const fullData: Candle[] = data;
   const replayActiveForThisChart = Boolean(isReplay && (isReplaySync || activeChart === chartId));
   const sessionContextVisible = showSessions || showSessionLevels || showSessionRanges;
   const latestCandleTime = fullData.length > 0 ? fullData[fullData.length - 1].time : null;
@@ -604,6 +602,10 @@ export default function Chart({
     !isReplaySelectingForThisChart &&
     (fullData.length === 0 || hasNoEarlierReplayData) &&
     (historyLoading || historyFailed || historyEmpty);
+
+  useEffect(() => {
+    themeRef.current = theme;
+  }, [theme]);
 
   useEffect(() => {
     toolRef.current = tool;
@@ -661,10 +663,6 @@ export default function Chart({
   useEffect(() => {
     dataRef.current = data;
   }, [data]);
-
-  useEffect(() => {
-    candleStoreDataRef.current = candleStoreData;
-  }, [candleStoreData]);
 
   useEffect(() => {
     activeChartRef.current = activeChart ?? null;
@@ -732,10 +730,7 @@ export default function Chart({
 
     try {
       const dpr = window.devicePixelRatio || 1;
-      const candles =
-        dataRef.current.length > 0
-          ? dataRef.current
-          : candleStoreDataRef.current[symbolRef.current]?.[timeframeRef.current] ?? [];
+      const candles = dataRef.current;
       const y = series.priceToCoordinate(point.price);
       if (y === null) return null;
 
@@ -947,9 +942,7 @@ export default function Chart({
   );
 
   const getAvailableCandles = useCallback((): Candle[] => {
-    return dataRef.current.length > 0
-      ? dataRef.current
-      : candleStoreDataRef.current[symbolRef.current]?.[timeframeRef.current] ?? [];
+    return dataRef.current;
   }, []);
 
   const pointFromCoordinates = useCallback((x: number, y: number): Point | null => {
@@ -1128,10 +1121,7 @@ export default function Chart({
       const chart = chartRef.current;
       if (!chart) return;
 
-      const currentData =
-        dataRef.current.length > 0
-          ? dataRef.current
-          : candleStoreDataRef.current[symbolRef.current]?.[timeframeRef.current] ?? [];
+      const currentData = dataRef.current;
       const replayActive = Boolean(
         isReplayRef.current &&
           (isReplaySyncRef.current || activeChartRef.current === chartId)
@@ -2300,6 +2290,7 @@ export default function Chart({
           setSelectedDrawing(null);
         }
 
+        const activeTheme = themeRef.current;
         const currentTool = toolRef.current;
         if (currentTool === "text") {
           const point = getSnappedPointFromParam(param);
@@ -2317,7 +2308,7 @@ export default function Chart({
             time: point.time,
             price: point.price,
             text: enteredText.trim() || "Text",
-            color: theme.accent,
+            color: activeTheme.accent,
             width: 1,
             opacity: 1,
           };
@@ -2355,7 +2346,7 @@ export default function Chart({
             start,
             end: point,
             extend: DEFAULT_TRENDLINE_EXTENSION,
-            color: theme.accent,
+            color: activeTheme.accent,
             width: 2,
             opacity: 1,
           };
@@ -2452,12 +2443,8 @@ export default function Chart({
 
     // LIVE DATA LEAK FIX: Prevent inactive charts from updating during independent replay
     try {
-      // Priority: use live data if available, otherwise fallback to historical from store
-      const candlesFromStore = candleStoreData[symbol]?.[timeframe] ?? [];
-      const displaySource = data.length > 0 ? "prop" : "store";
-      let displayData: Candle[] = data.length > 0
-        ? data
-        : candlesFromStore;
+      const displaySource = "prop";
+      let displayData: Candle[] = data;
 
       // When replay selection is armed, keep the full chart visible so the user can pick any candle.
       const shouldApplyReplay =
@@ -2585,7 +2572,6 @@ export default function Chart({
     }
   }, [
     activeChart,
-    candleStoreData,
     chartReady,
     chartId,
     data,

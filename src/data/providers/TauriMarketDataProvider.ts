@@ -8,6 +8,10 @@ import type {
   Timeframe,
 } from "../../types/marketData";
 import { sanitizeCandleSeries } from "../../utils/candleCache";
+import {
+  getLatestWindowTtlMs,
+  isLatestWindowRequest,
+} from "../../utils/historyFreshness";
 import type { LiveSubscription, MarketDataProvider } from "./MarketDataProvider";
 
 type StreamEventPayload = Candle & {
@@ -21,9 +25,17 @@ type SharedLiveSubscription = {
   consumers: Map<number, (candle: Candle) => void>;
 };
 
+type HistoricalCacheEntry = {
+  candles: Candle[];
+  fetchedAt: number;
+  rangeType: "bounded" | "latest";
+};
+
 const HISTORICAL_CACHE_LIMIT = 48;
 const SUPPORTED_TIMEFRAMES: Timeframe[] = ["15s", "1m", "3m"];
 const DEBUG_LIVE_UPDATES = import.meta.env.DEV;
+const VERBOSE_LIVE_DEBUG =
+  DEBUG_LIVE_UPDATES && import.meta.env.VITE_VERBOSE_LIVE_DEBUG === "true";
 
 function relayFrontendDebugLog(scope: string, payload: unknown) {
   if (!DEBUG_LIVE_UPDATES) {
@@ -106,7 +118,7 @@ function normalizeCapabilities(raw: ProviderCapabilities): ProviderCapabilities 
 export class TauriMarketDataProvider implements MarketDataProvider {
   private capabilitiesCache: ProviderCapabilities | null = null;
   private supportedSymbolsCache: SupportedSymbol[] | null = null;
-  private historicalCache = new Map<string, Candle[]>();
+  private historicalCache = new Map<string, HistoricalCacheEntry>();
   private sharedSubscriptions = new Map<string, SharedLiveSubscription>();
   private nextConsumerId = 1;
 
@@ -218,12 +230,12 @@ export class TauriMarketDataProvider implements MarketDataProvider {
     ].join(":");
   }
 
-  private setHistoricalCache(key: string, candles: Candle[]) {
+  private setHistoricalCache(key: string, entry: HistoricalCacheEntry) {
     if (this.historicalCache.has(key)) {
       this.historicalCache.delete(key);
     }
 
-    this.historicalCache.set(key, candles);
+    this.historicalCache.set(key, entry);
 
     while (this.historicalCache.size > HISTORICAL_CACHE_LIMIT) {
       const oldestKey = this.historicalCache.keys().next().value;
@@ -257,9 +269,17 @@ export class TauriMarketDataProvider implements MarketDataProvider {
       };
       const cacheKey = this.getHistoricalCacheKey(normalizedRequest);
       const cached = this.historicalCache.get(cacheKey);
+      const latestWindowRequest = isLatestWindowRequest(normalizedRequest);
 
       if (cached) {
-        return this.cloneCandles(cached);
+        if (
+          cached.rangeType === "bounded" ||
+          Date.now() - cached.fetchedAt <= getLatestWindowTtlMs(request.timeframe)
+        ) {
+          return this.cloneCandles(cached.candles);
+        }
+
+        this.historicalCache.delete(cacheKey);
       }
 
       const candles = await invoke<Candle[]>("get_historical", {
@@ -271,7 +291,11 @@ export class TauriMarketDataProvider implements MarketDataProvider {
       });
       const sanitized = this.sanitizeHistoricalResult(symbol, request.timeframe, candles);
 
-      this.setHistoricalCache(cacheKey, sanitized);
+      this.setHistoricalCache(cacheKey, {
+        candles: sanitized,
+        fetchedAt: Date.now(),
+        rangeType: latestWindowRequest ? "latest" : "bounded",
+      });
       return this.cloneCandles(sanitized);
     } catch (error) {
       throw createProviderError(
@@ -331,7 +355,7 @@ export class TauriMarketDataProvider implements MarketDataProvider {
           return;
         }
 
-        if (DEBUG_LIVE_UPDATES) {
+        if (VERBOSE_LIVE_DEBUG) {
           console.debug("[live:event]", {
             symbol: normalizedSymbol,
             timeframe,

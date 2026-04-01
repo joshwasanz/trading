@@ -8,7 +8,6 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { useToolStore } from "./store/useToolStore";
 import { useThemeStore } from "./store/useThemeStore";
 import { useWorkspaceStore } from "./store/useWorkspaceStore";
-import { useCandleStore } from "./store/useCandleStore";
 import { useLayoutState } from "./store/useLayoutState";
 import { EMPTY_CHART_DRAWINGS } from "./types/drawings";
 import { marketDataProvider } from "./data/providers";
@@ -34,17 +33,26 @@ import {
   normalizeInstrumentId,
 } from "./instruments";
 import {
-  loadScopedCandleCache,
-  persistScopedCandleCache,
+  loadScopedCandleCacheEnvelope,
+  persistScopedCandleCacheEnvelope,
   sanitizeCandleSeries,
+  type CandleCacheLatestFetches,
 } from "./utils/candleCache";
+import {
+  isLatestWindowFetchFresh,
+  isLatestWindowRequest,
+  type LatestWindowFetchMeta,
+} from "./utils/historyFreshness";
 import { findCandleIndexAtOrBefore } from "./utils/replay";
+import type { Workspace } from "./types/workspace";
 
 const DATA_STORAGE_KEY = "chart-data-v3";
 const LEGACY_DATA_STORAGE_KEYS = ["chart-data-v1", "chart-data-v2"];
 const MAX_HISTORY_BACKFILL_ATTEMPTS = 5;
 const DEFAULT_SUPPORTED_TIMEFRAMES: Timeframe[] = ["1m", "3m"];
 const DEBUG_LIVE_UPDATES = import.meta.env.DEV;
+const VERBOSE_LIVE_DEBUG =
+  DEBUG_LIVE_UPDATES && import.meta.env.VITE_VERBOSE_LIVE_DEBUG === "true";
 
 type ProviderStatusEvent = {
   kind: "error" | "info";
@@ -148,19 +156,28 @@ function getRequiredMarketContexts(
   return result;
 }
 
-function readStoredData(providerMode: ProviderMode): Record<string, Record<Timeframe, Candle[]>> {
-  if (typeof window === "undefined") return initialDataState;
+function readStoredCache(providerMode: ProviderMode): {
+  data: Record<string, Record<Timeframe, Candle[]>>;
+  latestFetches: CandleCacheLatestFetches;
+} {
+  if (typeof window === "undefined") {
+    return {
+      data: initialDataState,
+      latestFetches: createLatestWindowFetchesState(DEFAULT_SUPPORTED_SYMBOL_IDS),
+    };
+  }
 
   try {
-    const parsed = loadScopedCandleCache(
+    const parsed = loadScopedCandleCacheEnvelope(
       window.localStorage,
       DATA_STORAGE_KEY,
       LEGACY_DATA_STORAGE_KEYS,
       providerMode
     );
     const merged: Record<string, Record<Timeframe, Candle[]>> = createInitialDataState();
+    const latestFetches = createLatestWindowFetchesState(DEFAULT_SUPPORTED_SYMBOL_IDS);
 
-    for (const [symbol, series] of Object.entries(parsed)) {
+    for (const [symbol, series] of Object.entries(parsed.data)) {
       const normalizedSymbol = normalizeInstrumentId(symbol);
       if (FREE_TIER_VALIDATION_MODE && !isValidationModeSymbolAllowed(normalizedSymbol)) {
         relayFrontendDebugLog("validation:cache", {
@@ -188,10 +205,28 @@ function readStoredData(providerMode: ProviderMode): Record<string, Record<Timef
       };
     }
 
-    return merged;
+    for (const [symbol, series] of Object.entries(parsed.latestFetches)) {
+      const normalizedSymbol = normalizeInstrumentId(symbol);
+      if (FREE_TIER_VALIDATION_MODE && !isValidationModeSymbolAllowed(normalizedSymbol)) {
+        continue;
+      }
+
+      latestFetches[normalizedSymbol] = {
+        ...(latestFetches[normalizedSymbol] ?? {}),
+        ...series,
+      };
+    }
+
+    return {
+      data: merged,
+      latestFetches,
+    };
   } catch (error) {
     console.error("[App] Failed to read cached data:", error);
-    return initialDataState;
+    return {
+      data: initialDataState,
+      latestFetches: createLatestWindowFetchesState(DEFAULT_SUPPORTED_SYMBOL_IDS),
+    };
   }
 }
 
@@ -315,6 +350,16 @@ type ProviderNotice = {
   message: string;
 };
 
+type ProviderBootState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; providerMode: ProviderMode }
+  | { status: "degraded"; message: string }
+  | { status: "failed"; message: string };
+
+const DUPLICATE_REPLAY_NOTICE =
+  "Independent replay is disabled while multiple visible panels share the same symbol and timeframe. Enable synced replay or change one panel.";
+
 function createEmptyLoadedRange(): LoadedRange {
   return {
     oldest: null,
@@ -334,6 +379,44 @@ function createLoadedRangesState(symbolIds: string[]): LoadedRangesState {
   return Object.fromEntries(
     symbolIds.map((symbolId) => [symbolId, createEmptyLoadedRangeMap()])
   ) as LoadedRangesState;
+}
+
+function createLatestWindowFetchesState(symbolIds: string[]): CandleCacheLatestFetches {
+  return Object.fromEntries(symbolIds.map((symbolId) => [symbolId, {}])) as CandleCacheLatestFetches;
+}
+
+function getLatestWindowFetchMeta(
+  latestFetches: CandleCacheLatestFetches,
+  symbol: string,
+  timeframe: Timeframe
+): LatestWindowFetchMeta | null {
+  return latestFetches[symbol]?.[timeframe] ?? null;
+}
+
+function getLatestWindowMetaFromCandles(
+  candles: Candle[],
+  limit: number,
+  fetchedAt = Date.now()
+): LatestWindowFetchMeta {
+  return {
+    fetchedAt,
+    limit,
+    newest: candles[candles.length - 1]?.time ?? null,
+    rangeType: "latest",
+  };
+}
+
+function getDuplicateVisibleReplayContexts(panels: Panel[]): MarketContextKey[] {
+  const counts = new Map<MarketContextKey, number>();
+
+  for (const panel of panels) {
+    const key = makeMarketContextKey(panel.symbol, panel.timeframe);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .filter(([, count]) => count > 1)
+    .map(([key]) => key);
 }
 
 function createPanelContextKey(panel: Panel): string {
@@ -530,15 +613,24 @@ function AppInner() {
   const dataRef = useRef(data);
   const layoutPanelsRef = useRef<Panel[]>(DEFAULT_PANELS);
   const activeChartRef = useRef<string | null>(null);
+  const appMountedRef = useRef(true);
   const isReplayRef = useRef(false);
   const isReplaySyncRef = useRef(false);
+  const isReplaySelectingStartRef = useRef(false);
+  const replayStartTimeRef = useRef<number | null>(null);
+  const replayCursorTimeRef = useRef<number | null>(null);
   const [loadedRanges, setLoadedRanges] = useState<LoadedRangesState>(() =>
     createLoadedRangesState(DEFAULT_SUPPORTED_SYMBOL_IDS)
   );
   const loadedRangesRef = useRef(loadedRanges);
+  const [latestWindowFetches, setLatestWindowFetches] = useState<CandleCacheLatestFetches>(() =>
+    createLatestWindowFetchesState(DEFAULT_SUPPORTED_SYMBOL_IDS)
+  );
+  const latestWindowFetchesRef = useRef(latestWindowFetches);
   const inFlightHistoricalRequestsRef = useRef<Map<string, Promise<Candle[]>>>(new Map());
   const liveSubscriptionsRef = useRef<Map<MarketContextKey, LiveMarketSubscription>>(new Map());
   const pendingLiveSubscriptionsRef = useRef<Set<MarketContextKey>>(new Set());
+  const contextsPendingLatestRefreshRef = useRef<Set<MarketContextKey>>(new Set());
   const requiredContextsRef = useRef<RequiredMarketContext[]>([]);
   const undoHistoryRef = useRef<(() => void) | null>(null);
   const redoHistoryRef = useRef<(() => void) | null>(null);
@@ -546,7 +638,6 @@ function AppInner() {
   const replayPanelContextRef = useRef<string | null>(null);
 
   const [activeChart, setActiveChart] = useState<string | null>(null);
-  const [layoutType, setLayoutType] = useState(DEFAULT_LAYOUT_TYPE);
   
   // Replay engine state
   const [isReplay, setIsReplay] = useState(false);
@@ -570,8 +661,9 @@ function AppInner() {
     useState<ReplayHistoryStatus>("idle");
   const [replayHistoryMessage, setReplayHistoryMessage] = useState<string | null>(null);
   const [providerNotice, setProviderNotice] = useState<ProviderNotice | null>(null);
-  const [providerMode, setProviderMode] = useState<ProviderMode | null>(null);
-  const [providerCacheReady, setProviderCacheReady] = useState(false);
+  const [providerBootState, setProviderBootState] = useState<ProviderBootState>({
+    status: "idle",
+  });
   const [providerLiveSource, setProviderLiveSource] = useState<string | null>(null);
   const [providerPollIntervalMs, setProviderPollIntervalMs] = useState<number | null>(null);
   const [strictRealtime, setStrictRealtime] = useState(false);
@@ -579,7 +671,7 @@ function AppInner() {
     useState<SupportedSymbol[]>(DEFAULT_SUPPORTED_SYMBOLS);
   const [supportedTimeframes, setSupportedTimeframes] =
     useState<Timeframe[]>(DEFAULT_SUPPORTED_TIMEFRAMES);
-  const [liveSupported, setLiveSupported] = useState(true);
+  const [liveSupported, setLiveSupported] = useState(false);
   const [historyUiStates, setHistoryUiStates] =
     useState<Record<MarketContextKey, HistoryUiState>>({});
   const [validationStatus, setValidationStatus] = useState<ValidationStatus>({
@@ -597,14 +689,49 @@ function AppInner() {
     });
   }, []);
 
+  useEffect(() => {
+    return () => {
+      appMountedRef.current = false;
+    };
+  }, []);
+
   const tool = useToolStore((state) => state.tool);
   const magnet = useToolStore((state) => state.magnet);
   const { theme } = useThemeStore();
-  const { workspaces, setActiveWorkspace, createDefaultWorkspace } = useWorkspaceStore();
-  const { setData: setCandleData, loadFromCache: loadCandleDataFromCache } = useCandleStore();
+  const { workspaces, activeWorkspaceId, createDefaultWorkspace, updateWorkspace } =
+    useWorkspaceStore();
   const panels = useLayoutState((state) => state.panels);
   const focusedPanelId = useLayoutState((state) => state.focusedPanelId);
-  const layoutPanels = panels.length > 0 ? panels : DEFAULT_PANELS;
+  const activeWorkspace = useMemo<Workspace | null>(
+    () =>
+      workspaces.find((workspace) => workspace.id === activeWorkspaceId) ??
+      workspaces[0] ??
+      null,
+    [activeWorkspaceId, workspaces]
+  );
+  const layoutType = FREE_TIER_VALIDATION_MODE
+    ? DEFAULT_LAYOUT_TYPE
+    : activeWorkspace?.layoutType ?? DEFAULT_LAYOUT_TYPE;
+  const setLayoutType = useCallback(
+    (nextLayoutType: string) => {
+      const workspaceId = activeWorkspace?.id ?? activeWorkspaceId;
+      if (FREE_TIER_VALIDATION_MODE || !workspaceId || nextLayoutType === layoutType) {
+        return;
+      }
+
+      updateWorkspace(workspaceId, { layoutType: nextLayoutType });
+    },
+    [activeWorkspace?.id, activeWorkspaceId, layoutType, updateWorkspace]
+  );
+  const layoutPanels = useMemo(
+    () =>
+      panels.length > 0
+        ? panels
+        : activeWorkspace?.panels.length
+          ? activeWorkspace.panels
+          : DEFAULT_PANELS,
+    [activeWorkspace?.panels, panels]
+  );
   const visiblePanels = useMemo(
     () => getVisiblePanelsForLayout(layoutPanels, layoutType, focusedPanelId),
     [focusedPanelId, layoutPanels, layoutType]
@@ -620,6 +747,15 @@ function AppInner() {
 
     return requiredContexts.slice(0, 1);
   }, [requiredContexts]);
+  const duplicateVisibleReplayContexts = useMemo(
+    () => getDuplicateVisibleReplayContexts(visiblePanels),
+    [visiblePanels]
+  );
+  const hasDuplicateVisibleReplayContexts = duplicateVisibleReplayContexts.length > 0;
+  const providerMode = providerBootState.status === "ready"
+    ? providerBootState.providerMode
+    : null;
+  const providerRuntimeReady = providerBootState.status === "ready";
 
   const getReplayPanelState = useCallback(
     (panelId: string | null) => {
@@ -681,6 +817,14 @@ function AppInner() {
       return true;
     }
 
+    if (isReplaySelectingStartRef.current) {
+      return true;
+    }
+
+    if (replayStartTimeRef.current === null || replayCursorTimeRef.current === null) {
+      return true;
+    }
+
     if (isReplaySyncRef.current) {
       return false;
     }
@@ -721,6 +865,14 @@ function AppInner() {
     []
   );
 
+  useEffect(() => {
+    if (hasDuplicateVisibleReplayContexts) {
+      return;
+    }
+
+    clearProviderNotice((notice) => notice.message === DUPLICATE_REPLAY_NOTICE);
+  }, [clearProviderNotice, hasDuplicateVisibleReplayContexts]);
+
   const recordValidationProviderError = useCallback((message: string) => {
     if (!FREE_TIER_VALIDATION_MODE) {
       return;
@@ -758,27 +910,6 @@ function AppInner() {
 
     recordValidationProviderError(providerNotice.message);
   }, [providerNotice, recordValidationProviderError]);
-
-  useEffect(() => {
-    if (!FREE_TIER_VALIDATION_MODE) {
-      return;
-    }
-
-    let unlisten: UnlistenFn | null = null;
-
-    void listen<ProviderStatusEvent>("provider://status", (event) => {
-      const payload = event.payload;
-      if (payload.kind === "error") {
-        recordValidationProviderError(payload.message);
-      }
-    }).then((dispose) => {
-      unlisten = dispose;
-    });
-
-    return () => {
-      unlisten?.();
-    };
-  }, [recordValidationProviderError]);
 
   const setContextHistoryUiState = useCallback(
     (
@@ -848,26 +979,139 @@ function AppInner() {
     return dataRef.current[symbol]?.[timeframe]?.length ?? 0;
   }, []);
 
+  const getRetainedLatestWindowFetchMeta = useCallback((symbol: string, timeframe: Timeframe) => {
+    return getLatestWindowFetchMeta(latestWindowFetchesRef.current, symbol, timeframe);
+  }, []);
+
+  const recordLatestWindowFetch = useCallback(
+    (
+      symbol: string,
+      timeframe: Timeframe,
+      candles: Candle[],
+      limit: number,
+      fetchedAt = Date.now()
+    ) => {
+      const nextMeta = getLatestWindowMetaFromCandles(candles, limit, fetchedAt);
+
+      setLatestWindowFetches((prev) => {
+        const currentSymbolFetches = prev[symbol] ?? {};
+        const currentMeta = currentSymbolFetches[timeframe];
+
+        if (
+          currentMeta?.fetchedAt === nextMeta.fetchedAt &&
+          currentMeta.limit === nextMeta.limit &&
+          currentMeta.newest === nextMeta.newest
+        ) {
+          return prev;
+        }
+
+        const nextFetches = {
+          ...prev,
+          [symbol]: {
+            ...currentSymbolFetches,
+            [timeframe]: nextMeta,
+          },
+        };
+
+        latestWindowFetchesRef.current = nextFetches;
+        return nextFetches;
+      });
+    },
+    []
+  );
+
+  const invalidateLatestWindowFetch = useCallback((symbol: string, timeframe: Timeframe) => {
+    setLatestWindowFetches((prev) => {
+      if (!prev[symbol]?.[timeframe]) {
+        return prev;
+      }
+
+      const nextFetches = {
+        ...prev,
+        [symbol]: {
+          ...(prev[symbol] ?? {}),
+        },
+      };
+
+      delete nextFetches[symbol][timeframe];
+      latestWindowFetchesRef.current = nextFetches;
+      return nextFetches;
+    });
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: UnlistenFn | null = null;
+
+    void listen<ProviderStatusEvent>("provider://status", (event) => {
+      const payload = event.payload;
+      if (payload.kind !== "error") {
+        return;
+      }
+
+      if (FREE_TIER_VALIDATION_MODE) {
+        recordValidationProviderError(payload.message);
+      }
+
+      if (payload.symbol && payload.timeframe) {
+        const normalizedSymbol = normalizeInstrumentId(payload.symbol);
+        invalidateLatestWindowFetch(normalizedSymbol, payload.timeframe);
+        contextsPendingLatestRefreshRef.current.add(
+          makeMarketContextKey(normalizedSymbol, payload.timeframe)
+        );
+      }
+    }).then((dispose) => {
+      if (!active) {
+        dispose();
+        return;
+      }
+
+      unlisten = dispose;
+    });
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [invalidateLatestWindowFetch, recordValidationProviderError]);
+
   const fetchHistoricalDeduped = useCallback(
     async (
       request: HistoricalRequest & {
         force?: boolean;
       }
     ): Promise<Candle[]> => {
+      if (!providerMode) {
+        throw new Error("Provider boot is not ready.");
+      }
+
       const { symbol, timeframe, from, to, limit, force = false } = request;
       const loaded = getRetainedLoadedRange(symbol, timeframe);
       const retainedCount = getRetainedCandleCount(symbol, timeframe);
-      const requiredOpenEndedDepth =
-        from == null && to == null ? limit ?? historicalRequestLimit(timeframe) : 0;
+      const latestWindowRequest = isLatestWindowRequest({ from, to });
+      const requiredOpenEndedDepth = latestWindowRequest
+        ? limit ?? historicalRequestLimit(timeframe)
+        : 0;
       const hasRequestedOpenEndedDepth =
-        requiredOpenEndedDepth === 0 || retainedCount >= requiredOpenEndedDepth;
+        !latestWindowRequest || retainedCount >= requiredOpenEndedDepth;
+      const latestWindowFresh = latestWindowRequest
+        ? isLatestWindowFetchFresh(
+            getRetainedLatestWindowFetchMeta(symbol, timeframe),
+            timeframe,
+            requiredOpenEndedDepth
+          )
+        : false;
 
-      if (!force && hasRequestedOpenEndedDepth && isRangeCovered(loaded, from, to)) {
+      if (
+        !force &&
+        isRangeCovered(loaded, from, to) &&
+        (!latestWindowRequest || (hasRequestedOpenEndedDepth && latestWindowFresh))
+      ) {
         return [];
       }
 
       const key = makeRangeRequestKey(
-        providerMode ?? "unknown",
+        providerMode,
         symbol,
         timeframe,
         from,
@@ -888,7 +1132,7 @@ function AppInner() {
       inFlightHistoricalRequestsRef.current.set(key, promise);
       return promise;
     },
-    [getRetainedCandleCount, getRetainedLoadedRange, providerMode]
+    [getRetainedCandleCount, getRetainedLatestWindowFetchMeta, getRetainedLoadedRange, providerMode]
   );
 
   const applyHistoricalCandles = useCallback(
@@ -910,7 +1154,6 @@ function AppInner() {
 
       dataRef.current = nextState;
       setData(nextState);
-      setCandleData(symbol, timeframe, merged);
       setLoadedRanges((prev) => {
         const currentSymbolRanges = prev[symbol] ?? createEmptyLoadedRangeMap();
         const nextRanges = {
@@ -925,8 +1168,111 @@ function AppInner() {
         return nextRanges;
       });
     },
-    [setCandleData]
+    []
   );
+
+  const refreshLatestHistory = useCallback(
+    async (
+      symbol: string,
+      timeframe: Timeframe,
+      source: HistoryUiSource = "initial",
+      force = false
+    ) => {
+      const request = buildInitialHistoricalRequest(symbol, timeframe);
+      const candles = await fetchHistoricalDeduped({
+        ...request,
+        force,
+      });
+
+      if (candles.length > 0) {
+        applyHistoricalCandles(symbol, timeframe, candles);
+        recordLatestWindowFetch(symbol, timeframe, candles, request.limit ?? historicalRequestLimit(timeframe));
+      }
+
+      clearContextHistoryUiState(symbol, timeframe);
+      if (source !== "initial") {
+        clearProviderNotice((notice) => notice.message === "Refreshing recent history after a provider interruption.");
+      }
+
+      return candles;
+    },
+    [
+      applyHistoricalCandles,
+      clearContextHistoryUiState,
+      clearProviderNotice,
+      fetchHistoricalDeduped,
+      recordLatestWindowFetch,
+    ]
+  );
+
+  const triggerPendingLatestHistoryRefresh = useCallback(
+    (symbol: string, timeframe: Timeframe) => {
+      const normalizedSymbol = normalizeInstrumentId(symbol);
+      const contextKey = makeMarketContextKey(normalizedSymbol, timeframe);
+
+      if (!contextsPendingLatestRefreshRef.current.has(contextKey)) {
+        return;
+      }
+
+      contextsPendingLatestRefreshRef.current.delete(contextKey);
+      setContextHistoryUiState(
+        normalizedSymbol,
+        timeframe,
+        "loading",
+        "Refreshing recent history after a provider interruption...",
+        "context-sync"
+      );
+      showProviderNotice("warning", "Refreshing recent history after a provider interruption.");
+      void refreshLatestHistory(normalizedSymbol, timeframe, "context-sync", true).catch((error) => {
+        contextsPendingLatestRefreshRef.current.add(contextKey);
+        recordValidationProviderError(error instanceof Error ? error.message : String(error));
+        console.error(`[App] Failed to refresh latest history for ${contextKey}:`, error);
+        setContextHistoryUiState(
+          normalizedSymbol,
+          timeframe,
+          "failed",
+          "Could not refresh recent history after a provider interruption.",
+          "context-sync"
+        );
+      });
+    },
+    [
+      recordValidationProviderError,
+      refreshLatestHistory,
+      setContextHistoryUiState,
+      showProviderNotice,
+    ]
+  );
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: UnlistenFn | null = null;
+
+    void listen<ProviderStatusEvent>("provider://status", (event) => {
+      if (!active) {
+        return;
+      }
+
+      const payload = event.payload;
+      if (payload.kind !== "info" || !payload.symbol || !payload.timeframe) {
+        return;
+      }
+
+      triggerPendingLatestHistoryRefresh(payload.symbol, payload.timeframe);
+    }).then((dispose) => {
+      if (!active) {
+        dispose();
+        return;
+      }
+
+      unlisten = dispose;
+    });
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [triggerPendingLatestHistoryRefresh]);
 
   const loadOlderHistory = useCallback(
     async (symbol: string, timeframe: Timeframe, currentOldest: number | null) => {
@@ -1245,22 +1591,40 @@ function AppInner() {
     setReplayCursorTime(resolved.timestamp);
   }, [activeChart, replayStartTime, resolveReplayPosition]);
 
+  const guardIndependentReplay = useCallback(() => {
+    if (!hasDuplicateVisibleReplayContexts || isReplaySync) {
+      return false;
+    }
+
+    showProviderNotice("warning", DUPLICATE_REPLAY_NOTICE);
+    return true;
+  }, [hasDuplicateVisibleReplayContexts, isReplaySync, showProviderNotice]);
+
+  const clearReplayEntryState = useCallback(() => {
+    setIsReplay(false);
+    setIsReplaySelectingStart(false);
+    setReplaySelectionPanelId(null);
+    setReplayStartTime(null);
+    setReplayCursorTime(null);
+    setReplayIndex(0);
+    setIsPlaying(false);
+  }, []);
+
   const handleReplayToggle = useCallback((nextIsReplay: boolean) => {
     invalidateReplayHistoryFeedback();
-    setIsPlaying(false);
 
     if (!nextIsReplay) {
-      setIsReplay(false);
-      setIsReplaySelectingStart(false);
-      setReplaySelectionPanelId(null);
-      setReplayStartTime(null);
-      setReplayCursorTime(null);
-      setReplayIndex(0);
+      clearReplayEntryState();
+      return;
+    }
+
+    if (guardIndependentReplay()) {
       return;
     }
 
     const targetPanelId = activeChart ?? visiblePanels[0]?.id ?? null;
     setIsReplay(true);
+    setIsPlaying(false);
     setIsReplaySelectingStart(true);
     setReplaySelectionPanelId(targetPanelId);
     if (targetPanelId) {
@@ -1269,9 +1633,19 @@ function AppInner() {
     setReplayStartTime(null);
     setReplayCursorTime(null);
     setReplayIndex(0);
-  }, [activeChart, invalidateReplayHistoryFeedback, visiblePanels]);
+  }, [
+    activeChart,
+    clearReplayEntryState,
+    guardIndependentReplay,
+    invalidateReplayHistoryFeedback,
+    visiblePanels,
+  ]);
 
   const armReplaySelection = useCallback(() => {
+    if (guardIndependentReplay()) {
+      return;
+    }
+
     invalidateReplayHistoryFeedback();
     const targetPanelId = activeChart ?? visiblePanels[0]?.id ?? null;
     setIsReplay(true);
@@ -1281,17 +1655,27 @@ function AppInner() {
     if (targetPanelId) {
       setActiveChart(targetPanelId);
     }
-  }, [activeChart, invalidateReplayHistoryFeedback, visiblePanels]);
+    setReplayStartTime(null);
+    setReplayCursorTime(null);
+    setReplayIndex(0);
+  }, [activeChart, guardIndependentReplay, invalidateReplayHistoryFeedback, visiblePanels]);
 
   const handleReplayStart = useCallback(
     (payload: ReplayStartPayload) => {
+      if (guardIndependentReplay()) {
+        return;
+      }
+
       void (async () => {
         const resolved = await resolveReplayTargetWithHistory(
           payload.panelId,
           payload.timestamp,
           "start"
         );
-        if (!resolved) return;
+        if (!resolved) {
+          clearReplayEntryState();
+          return;
+        }
 
         setActiveChart(payload.panelId);
         setIsReplay(true);
@@ -1303,7 +1687,7 @@ function AppInner() {
         setReplayIndex(resolved.index);
       })();
     },
-    [resolveReplayTargetWithHistory]
+    [clearReplayEntryState, guardIndependentReplay, resolveReplayTargetWithHistory]
   );
 
   // Jump to specific time: use the same backfill loop as replay-start so both flows stay aligned.
@@ -1341,6 +1725,21 @@ function AppInner() {
     const { start } = getSessionRange(anchorDate, session);
     goToTime(start);
   };
+
+  useEffect(() => {
+    if (!isReplay || isReplaySync || !hasDuplicateVisibleReplayContexts) {
+      return;
+    }
+
+    showProviderNotice("warning", DUPLICATE_REPLAY_NOTICE);
+    clearReplayEntryState();
+  }, [
+    clearReplayEntryState,
+    hasDuplicateVisibleReplayContexts,
+    isReplay,
+    isReplaySync,
+    showProviderNotice,
+  ]);
 
   // Autoplay: step forward at intervals based on playSpeed
   useEffect(() => {
@@ -1520,6 +1919,10 @@ function AppInner() {
   }, [loadedRanges]);
 
   useEffect(() => {
+    latestWindowFetchesRef.current = latestWindowFetches;
+  }, [latestWindowFetches]);
+
+  useEffect(() => {
     requiredContextsRef.current = effectiveRequiredContexts;
   }, [effectiveRequiredContexts]);
 
@@ -1532,15 +1935,11 @@ function AppInner() {
       return;
     }
 
-    if (layoutType !== DEFAULT_LAYOUT_TYPE) {
-      setLayoutType(DEFAULT_LAYOUT_TYPE);
-    }
-
     const validationPanelId = layoutPanels[0]?.id ?? null;
     if (validationPanelId && activeChart !== validationPanelId) {
       setActiveChart(validationPanelId);
     }
-  }, [activeChart, layoutPanels, layoutType]);
+  }, [activeChart, layoutPanels]);
 
   useEffect(() => {
     activeChartRef.current = activeChart;
@@ -1553,6 +1952,18 @@ function AppInner() {
   useEffect(() => {
     isReplaySyncRef.current = isReplaySync;
   }, [isReplaySync]);
+
+  useEffect(() => {
+    isReplaySelectingStartRef.current = isReplaySelectingStart;
+  }, [isReplaySelectingStart]);
+
+  useEffect(() => {
+    replayStartTimeRef.current = replayStartTime;
+  }, [replayStartTime]);
+
+  useEffect(() => {
+    replayCursorTimeRef.current = replayCursorTime;
+  }, [replayCursorTime]);
 
   useEffect(() => {
     const activeKeys = new Set<MarketContextKey>(
@@ -1628,6 +2039,26 @@ function AppInner() {
     });
   }, [supportedSymbols]);
 
+  useEffect(() => {
+    setLatestWindowFetches((prev) => {
+      let changed = false;
+      const nextFetches = { ...prev };
+
+      for (const { id } of supportedSymbols) {
+        if (nextFetches[id]) continue;
+        nextFetches[id] = {};
+        changed = true;
+      }
+
+      if (!changed) {
+        return prev;
+      }
+
+      latestWindowFetchesRef.current = nextFetches;
+      return nextFetches;
+    });
+  }, [supportedSymbols]);
+
   // Initialize default workspace if none exist
   useEffect(() => {
     if (FREE_TIER_VALIDATION_MODE) {
@@ -1659,13 +2090,14 @@ function AppInner() {
     };
 
     createDefaultWorkspace(defaultWorkspace);
-    setActiveWorkspace(defaultWorkspace.id);
-  }, [workspaces.length, createDefaultWorkspace, setActiveWorkspace]);
+  }, [workspaces.length, createDefaultWorkspace]);
 
   useEffect(() => {
     let cancelled = false;
 
     async function loadProviderCapabilities() {
+      setProviderBootState({ status: "loading" });
+
       try {
         const capabilities = await marketDataProvider.getCapabilities();
         if (cancelled) {
@@ -1695,11 +2127,23 @@ function AppInner() {
           return sameTimeframes ? current : capabilities.supportedTimeframes;
         });
         setLiveSupported(capabilities.liveSupported);
-        setProviderCacheReady(false);
-        setProviderMode(capabilities.providerMode);
         setProviderLiveSource(capabilities.liveSource ?? null);
         setProviderPollIntervalMs(capabilities.pollIntervalMs ?? null);
         setStrictRealtime(Boolean(capabilities.strictRealtime));
+        const cached = readStoredCache(capabilities.providerMode);
+        const nextRanges = createLoadedRangesFromData(cached.data);
+
+        inFlightHistoricalRequestsRef.current.clear();
+        dataRef.current = cached.data;
+        loadedRangesRef.current = nextRanges;
+        latestWindowFetchesRef.current = cached.latestFetches;
+        setData(cached.data);
+        setLoadedRanges(nextRanges);
+        setLatestWindowFetches(cached.latestFetches);
+        setProviderBootState({
+          status: "ready",
+          providerMode: capabilities.providerMode,
+        });
         clearValidationProviderError();
 
         if (capabilities.notice) {
@@ -1708,18 +2152,23 @@ function AppInner() {
           clearProviderNotice((notice) => notice.tone === "warning");
         }
       } catch (error) {
-        console.warn("[App] Falling back to default provider capabilities:", error);
+        const message =
+          error instanceof Error ? error.message : "Provider capabilities could not be loaded.";
+        console.warn("[App] Provider capabilities failed to load:", error);
         recordValidationProviderError(
           error instanceof Error ? error.message : String(error)
         );
         if (!cancelled) {
           setSupportedTimeframes(DEFAULT_SUPPORTED_TIMEFRAMES);
-          setLiveSupported(true);
-          setProviderCacheReady(true);
+          setLiveSupported(false);
           setProviderLiveSource(null);
           setProviderPollIntervalMs(null);
           setStrictRealtime(false);
-          showProviderNotice("warning", "Using default provider capabilities while backend settings load.");
+          setProviderBootState({
+            status: "failed",
+            message,
+          });
+          showProviderNotice("error", message);
         }
       }
     }
@@ -1736,41 +2185,27 @@ function AppInner() {
     showProviderNotice,
   ]);
 
-  useEffect(() => {
-    if (!providerMode) {
-      return;
-    }
-
-    const cachedData = readStoredData(providerMode);
-    const nextRanges = createLoadedRangesFromData(cachedData);
-
-    inFlightHistoricalRequestsRef.current.clear();
-    dataRef.current = cachedData;
-    loadedRangesRef.current = nextRanges;
-    setData(cachedData);
-    setLoadedRanges(nextRanges);
-    loadCandleDataFromCache(providerMode);
-    setProviderCacheReady(true);
-  }, [loadCandleDataFromCache, providerMode]);
-
   // Persist chart data to localStorage on every change
   useEffect(() => {
-    if (!providerMode || !providerCacheReady) {
+    if (!providerMode || !providerRuntimeReady) {
       return;
     }
 
     try {
-      persistScopedCandleCache(
+      persistScopedCandleCacheEnvelope(
         window.localStorage,
         DATA_STORAGE_KEY,
         LEGACY_DATA_STORAGE_KEYS,
         providerMode,
-        data
+        {
+          data,
+          latestFetches: latestWindowFetches,
+        }
       );
     } catch (error) {
       console.error("[App] Failed to cache chart data:", error);
     }
-  }, [data, providerCacheReady, providerMode]);
+  }, [data, latestWindowFetches, providerMode, providerRuntimeReady]);
 
   // Apply theme CSS variables
   useEffect(() => {
@@ -1790,18 +2225,24 @@ function AppInner() {
     let historicalLoadFailed = false;
 
     async function ensureVisibleHistoryLoaded() {
-      if (!providerCacheReady) {
+      if (!providerRuntimeReady) {
         return;
       }
 
       for (const context of effectiveRequiredContexts) {
         try {
           const request = buildInitialHistoricalRequest(context.symbol, context.timeframe);
-          const alreadyCovered = isRangeCovered(
-            getRetainedLoadedRange(context.symbol, context.timeframe),
-            request.from,
-            request.to
-          );
+          const retainedRange = getRetainedLoadedRange(context.symbol, context.timeframe);
+          const retainedCount = getRetainedCandleCount(context.symbol, context.timeframe);
+          const requiredLimit = request.limit ?? historicalRequestLimit(context.timeframe);
+          const alreadyCovered =
+            isRangeCovered(retainedRange, request.from, request.to) &&
+            retainedCount >= requiredLimit &&
+            isLatestWindowFetchFresh(
+              getRetainedLatestWindowFetchMeta(context.symbol, context.timeframe),
+              context.timeframe,
+              requiredLimit
+            );
 
           if (alreadyCovered) {
             clearContextHistoryUiState(context.symbol, context.timeframe);
@@ -1816,7 +2257,11 @@ function AppInner() {
             "initial"
           );
 
-          const candles = await fetchHistoricalDeduped(request);
+          const candles = await refreshLatestHistory(
+            context.symbol,
+            context.timeframe,
+            "initial"
+          );
 
           if (cancelled || candles.length === 0) {
             const retainedCandles = dataRef.current[context.symbol]?.[context.timeframe] ?? [];
@@ -1835,9 +2280,6 @@ function AppInner() {
             }
             continue;
           }
-
-          applyHistoricalCandles(context.symbol, context.timeframe, candles);
-          clearContextHistoryUiState(context.symbol, context.timeframe);
         } catch (error) {
           historicalLoadFailed = true;
           recordValidationProviderError(error instanceof Error ? error.message : String(error));
@@ -1871,14 +2313,15 @@ function AppInner() {
       cancelled = true;
     };
   }, [
-    applyHistoricalCandles,
     clearContextHistoryUiState,
     clearProviderNotice,
     effectiveRequiredContexts,
-    fetchHistoricalDeduped,
+    getRetainedCandleCount,
+    getRetainedLatestWindowFetchMeta,
     getRetainedLoadedRange,
-    providerCacheReady,
+    providerRuntimeReady,
     recordValidationProviderError,
+    refreshLatestHistory,
     setContextHistoryUiState,
     showProviderNotice,
   ]);
@@ -1888,7 +2331,7 @@ function AppInner() {
     let subscriptionFailed = false;
 
     async function syncDemandDrivenSubscriptions() {
-      if (!providerCacheReady) {
+      if (!providerRuntimeReady) {
         return;
       }
 
@@ -1945,6 +2388,14 @@ function AppInner() {
         pendingSubscriptions.add(context.key);
 
         try {
+          if (VERBOSE_LIVE_DEBUG) {
+            relayFrontendDebugLog("live:subscribe", {
+              action: "start",
+              key: context.key,
+              symbol: context.symbol,
+              timeframe: context.timeframe,
+            });
+          }
           const subscription = await marketDataProvider.subscribeLive(
             context.symbol,
             context.timeframe,
@@ -1956,7 +2407,45 @@ function AppInner() {
                 }));
               }
 
-              if (cancelled || !shouldApplyLiveUpdate(context.symbol, context.timeframe)) return;
+              if (!appMountedRef.current) {
+                return;
+              }
+
+              const stillRequired = requiredContextsRef.current.some(
+                (requiredContext) => requiredContext.key === context.key
+              );
+              if (!stillRequired) {
+                if (VERBOSE_LIVE_DEBUG) {
+                  relayFrontendDebugLog("live:drop", {
+                    reason: "context-removed",
+                    key: context.key,
+                    symbol: context.symbol,
+                    timeframe: context.timeframe,
+                    time: incoming.time,
+                  });
+                }
+                return;
+              }
+
+              if (!shouldApplyLiveUpdate(context.symbol, context.timeframe)) {
+                if (VERBOSE_LIVE_DEBUG) {
+                  relayFrontendDebugLog("live:drop", {
+                    reason: "replay-suppressed",
+                    key: context.key,
+                    symbol: context.symbol,
+                    timeframe: context.timeframe,
+                    time: incoming.time,
+                    isReplay: isReplayRef.current,
+                    isReplaySelectingStart: isReplaySelectingStartRef.current,
+                    replayStartTime: replayStartTimeRef.current,
+                    replayCursorTime: replayCursorTimeRef.current,
+                    activeChart: activeChartRef.current,
+                  });
+                }
+                return;
+              }
+
+              triggerPendingLatestHistoryRefresh(context.symbol, context.timeframe);
 
               setData((prev) => {
                 const currentSymbolData = prev[context.symbol] ?? createEmptyTimeframeData();
@@ -1966,7 +2455,7 @@ function AppInner() {
                   context.timeframe
                 );
 
-                if (DEBUG_LIVE_UPDATES) {
+                if (VERBOSE_LIVE_DEBUG) {
                   console.debug("[live:merge]", {
                     symbol: context.symbol,
                     timeframe: context.timeframe,
@@ -2026,6 +2515,7 @@ function AppInner() {
 
           currentSubscriptions.set(context.key, subscription);
           clearValidationProviderError();
+          triggerPendingLatestHistoryRefresh(context.symbol, context.timeframe);
         } catch (error) {
           subscriptionFailed = true;
           recordValidationProviderError(error instanceof Error ? error.message : String(error));
@@ -2056,10 +2546,13 @@ function AppInner() {
     clearValidationProviderError,
     effectiveRequiredContexts,
     liveSupported,
-    providerCacheReady,
+    providerRuntimeReady,
+    refreshLatestHistory,
     recordValidationProviderError,
+    setContextHistoryUiState,
     shouldApplyLiveUpdate,
     showProviderNotice,
+    triggerPendingLatestHistoryRefresh,
   ]);
 
   useEffect(() => {
@@ -2154,7 +2647,12 @@ function AppInner() {
                 {validationActiveContext?.symbol?.toUpperCase() ?? "EURUSD"}{" "}
                 {validationActiveContext?.timeframe ?? "1m"}
               </div>
-              <div>Provider: {providerMode ?? "loading"}</div>
+              <div>
+                Provider:{" "}
+                {providerBootState.status === "ready"
+                  ? providerMode
+                  : providerBootState.status}
+              </div>
               <div>Live: {providerLiveSource ?? "real_poll"}</div>
               <div>Poll: {providerPollIntervalMs ?? 15_000}ms</div>
               <div>Strict: {strictRealtime ? "on" : "off"}</div>
