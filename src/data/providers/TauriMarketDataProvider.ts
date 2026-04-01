@@ -23,6 +23,18 @@ type SharedLiveSubscription = {
 
 const HISTORICAL_CACHE_LIMIT = 48;
 const SUPPORTED_TIMEFRAMES: Timeframe[] = ["15s", "1m", "3m"];
+const DEBUG_LIVE_UPDATES = import.meta.env.DEV;
+
+function relayFrontendDebugLog(scope: string, payload: unknown) {
+  if (!DEBUG_LIVE_UPDATES) {
+    return;
+  }
+
+  void invoke("frontend_debug_log", {
+    scope,
+    payload: JSON.stringify(payload),
+  }).catch(() => undefined);
+}
 
 function createProviderError(scope: string, error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
@@ -78,6 +90,16 @@ function normalizeCapabilities(raw: ProviderCapabilities): ProviderCapabilities 
     liveSupported: Boolean(raw?.liveSupported),
     notice:
       typeof raw?.notice === "string" && raw.notice.trim().length > 0 ? raw.notice.trim() : null,
+    validationMode: Boolean(raw?.validationMode),
+    strictRealtime: Boolean(raw?.strictRealtime),
+    liveSource:
+      typeof raw?.liveSource === "string" && raw.liveSource.trim().length > 0
+        ? raw.liveSource.trim()
+        : null,
+    pollIntervalMs:
+      typeof raw?.pollIntervalMs === "number" && Number.isFinite(raw.pollIntervalMs)
+        ? raw.pollIntervalMs
+        : null,
   };
 }
 
@@ -87,6 +109,10 @@ export class TauriMarketDataProvider implements MarketDataProvider {
   private historicalCache = new Map<string, Candle[]>();
   private sharedSubscriptions = new Map<string, SharedLiveSubscription>();
   private nextConsumerId = 1;
+
+  private getProviderScope(): string {
+    return this.capabilitiesCache?.providerMode ?? "unknown";
+  }
 
   async getCapabilities(): Promise<ProviderCapabilities> {
     if (this.capabilitiesCache) {
@@ -183,6 +209,7 @@ export class TauriMarketDataProvider implements MarketDataProvider {
 
   private getHistoricalCacheKey(request: HistoricalRequest): string {
     return [
+      this.getProviderScope(),
       request.symbol.trim().toLowerCase(),
       request.timeframe,
       request.from ?? "null",
@@ -262,7 +289,7 @@ export class TauriMarketDataProvider implements MarketDataProvider {
     try {
       this.assertSupportedTimeframe(timeframe);
       const normalizedSymbol = await this.assertSupportedSymbol(symbol);
-      const key = `${normalizedSymbol}:${timeframe}`;
+      const key = `${this.getProviderScope()}:${normalizedSymbol}:${timeframe}`;
       const consumerId = this.nextConsumerId++;
       const existing = this.sharedSubscriptions.get(key);
 
@@ -302,6 +329,21 @@ export class TauriMarketDataProvider implements MarketDataProvider {
         const candle = this.sanitizeLivePayload(normalizedSymbol, timeframe, payload);
         if (!candle) {
           return;
+        }
+
+        if (DEBUG_LIVE_UPDATES) {
+          console.debug("[live:event]", {
+            symbol: normalizedSymbol,
+            timeframe,
+            time: candle.time,
+            close: candle.close,
+          });
+          relayFrontendDebugLog("live:event", {
+            symbol: normalizedSymbol,
+            timeframe,
+            time: candle.time,
+            close: candle.close,
+          });
         }
 
         const shared = this.sharedSubscriptions.get(key);

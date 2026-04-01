@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import type { Workspace } from "../types/workspace";
-import { normalizeInstrumentId, normalizeInstrumentPanels } from "../instruments";
+import {
+  FREE_TIER_VALIDATION_MODE,
+  normalizeInstrumentId,
+  normalizeInstrumentPanels,
+} from "../instruments";
 
 const STORAGE_KEY = "trading_workspaces_v1";
 
@@ -22,6 +26,7 @@ type State = {
 
 function loadWorkspacesFromStorage(): Workspace[] {
   if (typeof window === "undefined") return [];
+  if (FREE_TIER_VALIDATION_MODE) return [];
 
   try {
     const stored = window.localStorage.getItem(STORAGE_KEY);

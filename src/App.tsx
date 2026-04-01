@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import TopBar from "./components/TopBar";
 import LayoutManager from "./layout/LayoutManager";
 import Sidebar from "./components/SideBar";
@@ -15,6 +17,7 @@ import type {
   HistoricalRequest,
   HistoryUiSource,
   HistoryUiState,
+  ProviderMode,
   SupportedSymbol,
   Timeframe,
 } from "./types/marketData";
@@ -23,21 +26,50 @@ import { getSessionRange, type SessionKey } from "./utils/sessions";
 import { DEFAULT_SMA_PERIOD, sanitizeIndicatorPeriod } from "./utils/indicators";
 import {
   DEFAULT_PANELS,
+  DEFAULT_LAYOUT_TYPE,
   DEFAULT_SUPPORTED_SYMBOLS,
   DEFAULT_SUPPORTED_SYMBOL_IDS,
+  FREE_TIER_VALIDATION_MODE,
+  isValidationModeSymbolAllowed,
   normalizeInstrumentId,
 } from "./instruments";
 import {
-  clearLegacyMarketDataCaches,
-  sanitizeCachedCandleData,
+  loadScopedCandleCache,
+  persistScopedCandleCache,
   sanitizeCandleSeries,
 } from "./utils/candleCache";
 import { findCandleIndexAtOrBefore } from "./utils/replay";
 
-const DATA_STORAGE_KEY = "chart-data-v2";
-const LEGACY_DATA_STORAGE_KEYS = ["chart-data-v1"];
+const DATA_STORAGE_KEY = "chart-data-v3";
+const LEGACY_DATA_STORAGE_KEYS = ["chart-data-v1", "chart-data-v2"];
 const MAX_HISTORY_BACKFILL_ATTEMPTS = 5;
-const DEFAULT_SUPPORTED_TIMEFRAMES: Timeframe[] = ["15s", "1m", "3m"];
+const DEFAULT_SUPPORTED_TIMEFRAMES: Timeframe[] = ["1m", "3m"];
+const DEBUG_LIVE_UPDATES = import.meta.env.DEV;
+
+type ProviderStatusEvent = {
+  kind: "error" | "info";
+  source: string;
+  symbol?: string | null;
+  timeframe?: Timeframe | null;
+  message: string;
+};
+
+type ValidationStatus = {
+  lastLiveEventTime: number | null;
+  lastMergeTime: number | null;
+  lastProviderError: string | null;
+};
+
+function relayFrontendDebugLog(scope: string, payload: unknown) {
+  if (!DEBUG_LIVE_UPDATES) {
+    return;
+  }
+
+  void invoke("frontend_debug_log", {
+    scope,
+    payload: JSON.stringify(payload),
+  }).catch(() => undefined);
+}
 
 type Panel = {
   id: string;
@@ -78,6 +110,10 @@ function getVisiblePanelsForLayout(
   layoutType: string,
   focusedPanelId: string | null
 ): Panel[] {
+  if (FREE_TIER_VALIDATION_MODE || panels.length <= 1 || layoutType === "1") {
+    return panels.slice(0, 1);
+  }
+
   if (focusedPanelId) {
     const focusedPanel = panels.find((panel) => panel.id === focusedPanelId);
     return focusedPanel ? [focusedPanel] : [];
@@ -112,19 +148,28 @@ function getRequiredMarketContexts(
   return result;
 }
 
-function readStoredData(): Record<string, Record<Timeframe, Candle[]>> {
+function readStoredData(providerMode: ProviderMode): Record<string, Record<Timeframe, Candle[]>> {
   if (typeof window === "undefined") return initialDataState;
 
   try {
-    clearLegacyMarketDataCaches(window.localStorage, LEGACY_DATA_STORAGE_KEYS);
-    const stored = window.localStorage.getItem(DATA_STORAGE_KEY);
-    if (!stored) return initialDataState;
-
-    const parsed = sanitizeCachedCandleData(JSON.parse(stored));
+    const parsed = loadScopedCandleCache(
+      window.localStorage,
+      DATA_STORAGE_KEY,
+      LEGACY_DATA_STORAGE_KEYS,
+      providerMode
+    );
     const merged: Record<string, Record<Timeframe, Candle[]>> = createInitialDataState();
 
     for (const [symbol, series] of Object.entries(parsed)) {
       const normalizedSymbol = normalizeInstrumentId(symbol);
+      if (FREE_TIER_VALIDATION_MODE && !isValidationModeSymbolAllowed(normalizedSymbol)) {
+        relayFrontendDebugLog("validation:cache", {
+          action: "blocked_hydration",
+          symbol: normalizedSymbol,
+        });
+        continue;
+      }
+
       const current = merged[normalizedSymbol] ?? createEmptyTimeframeData();
       const next15s = sanitizeCandleSeries(
         normalizedSymbol,
@@ -135,7 +180,9 @@ function readStoredData(): Record<string, Record<Timeframe, Candle[]>> {
       const next3m = sanitizeCandleSeries(normalizedSymbol, "3m", series["3m"] ?? current["3m"]);
 
       merged[normalizedSymbol] = {
-        "15s": mergeCandlesPreservingOrder(current["15s"], next15s),
+        "15s": FREE_TIER_VALIDATION_MODE
+          ? current["15s"]
+          : mergeCandlesPreservingOrder(current["15s"], next15s),
         "1m": mergeCandlesPreservingOrder(current["1m"], next1m),
         "3m": mergeCandlesPreservingOrder(current["3m"], next3m),
       };
@@ -148,26 +195,79 @@ function readStoredData(): Record<string, Record<Timeframe, Candle[]>> {
   }
 }
 
-function upsertCandleSeries(current: Candle[], incoming: Candle): Candle[] {
-  const maxCandles = 500;
+function candlesEqual(left: Candle, right: Candle): boolean {
+  return (
+    left.time === right.time &&
+    left.open === right.open &&
+    left.high === right.high &&
+    left.low === right.low &&
+    left.close === right.close
+  );
+}
 
-  if (current.length === 0) return [incoming];
+function trimRecentCandles(candles: Candle[], maxCandles: number): Candle[] {
+  return candles.length > maxCandles
+    ? candles.slice(candles.length - maxCandles)
+    : candles;
+}
+
+type LiveMergeAction = "append" | "replace" | "insert" | "ignore";
+
+type LiveMergeResult = {
+  action: LiveMergeAction;
+  candles: Candle[];
+};
+
+function liveRetentionLimit(timeframe: Timeframe): number {
+  switch (timeframe) {
+    case "15s":
+      return 1200;
+    case "1m":
+      return 3000;
+    case "3m":
+      return 2000;
+    default:
+      return 1500;
+  }
+}
+
+function mergeLiveCandleSeries(
+  current: Candle[],
+  incoming: Candle,
+  timeframe: Timeframe
+): LiveMergeResult {
+  if (current.length === 0) {
+    return { action: "append", candles: [incoming] };
+  }
+
+  const exactIndex = current.findIndex((candle) => candle.time === incoming.time);
+  if (exactIndex >= 0) {
+    if (candlesEqual(current[exactIndex], incoming)) {
+      return { action: "ignore", candles: current };
+    }
+
+    const next = [...current];
+    next[exactIndex] = incoming;
+    return { action: "replace", candles: next };
+  }
 
   const next = [...current];
-  const lastIndex = next.length - 1;
-  const last = next[lastIndex];
+  const insertIndex = next.findIndex((candle) => candle.time > incoming.time);
+  const targetSize = Math.max(current.length, liveRetentionLimit(timeframe));
 
-  if (incoming.time > last.time) {
+  if (insertIndex === -1) {
     next.push(incoming);
-  } else if (incoming.time === last.time) {
-    next[lastIndex] = incoming;
+    return {
+      action: "append",
+      candles: trimRecentCandles(next, targetSize),
+    };
   }
 
-  if (next.length > maxCandles) {
-    next.splice(0, next.length - maxCandles);
-  }
-
-  return next;
+  next.splice(insertIndex, 0, incoming);
+  return {
+    action: "insert",
+    candles: trimRecentCandles(next, targetSize),
+  };
 }
 
 function mergeHistoricalSeries(existing: Candle[], historical: Candle[]): Candle[] {
@@ -247,6 +347,14 @@ function createIdleHistoryUiState(): HistoryUiState {
   };
 }
 
+function formatValidationTimestamp(timestamp: number | null): string {
+  if (timestamp === null) {
+    return "waiting";
+  }
+
+  return new Date(timestamp * 1_000).toLocaleTimeString();
+}
+
 function timeframeSeconds(timeframe: Timeframe): number {
   switch (timeframe) {
     case "15s":
@@ -260,19 +368,26 @@ function timeframeSeconds(timeframe: Timeframe): number {
   }
 }
 
-function buildInitialHistoricalRequest(symbol: string, timeframe: Timeframe) {
-  const step = timeframeSeconds(timeframe);
-  const limit = timeframe === "15s" ? 600 : timeframe === "1m" ? 500 : 400;
-  const now = Math.floor(Date.now() / 1000);
-  const to = now - (now % step);
-  const from = to - (limit - 1) * step;
+function historicalRequestLimit(timeframe: Timeframe): number {
+  switch (timeframe) {
+    case "15s":
+      return 600;
+    case "1m":
+      return 1500;
+    case "3m":
+      return 1200;
+    default:
+      return 500;
+  }
+}
 
+function buildInitialHistoricalRequest(symbol: string, timeframe: Timeframe): HistoricalRequest {
   return {
     symbol,
     timeframe,
-    from,
-    to,
-    limit,
+    from: undefined,
+    to: undefined,
+    limit: historicalRequestLimit(timeframe),
   };
 }
 
@@ -287,14 +402,32 @@ function getLoadedRangeFromCandles(candles: Candle[]): LoadedRange {
   };
 }
 
+function createLoadedRangesFromData(
+  data: Record<string, Record<Timeframe, Candle[]>>
+): LoadedRangesState {
+  const symbolIds = Array.from(new Set([...DEFAULT_SUPPORTED_SYMBOL_IDS, ...Object.keys(data)]));
+  const ranges = createLoadedRangesState(symbolIds);
+
+  for (const [symbol, series] of Object.entries(data)) {
+    ranges[symbol] = {
+      "15s": getLoadedRangeFromCandles(series["15s"] ?? []),
+      "1m": getLoadedRangeFromCandles(series["1m"] ?? []),
+      "3m": getLoadedRangeFromCandles(series["3m"] ?? []),
+    };
+  }
+
+  return ranges;
+}
+
 function makeRangeRequestKey(
+  providerMode: ProviderMode | "unknown",
   symbol: string,
   timeframe: Timeframe,
   from: number | null | undefined,
   to: number | null | undefined,
   limit: number | null | undefined
 ) {
-  return `${symbol}:${timeframe}:${from ?? "null"}:${to ?? "null"}:${limit ?? "null"}`;
+  return `${providerMode}:${symbol}:${timeframe}:${from ?? "null"}:${to ?? "null"}:${limit ?? "null"}`;
 }
 
 function isRangeCovered(
@@ -393,7 +526,7 @@ void findIndexByTime;
 // ─────────────────────────────────────────────────────────────────────────────
 
 function AppInner() {
-  const [data, setData] = useState(() => readStoredData());
+  const [data, setData] = useState(() => initialDataState);
   const dataRef = useRef(data);
   const layoutPanelsRef = useRef<Panel[]>(DEFAULT_PANELS);
   const activeChartRef = useRef<string | null>(null);
@@ -413,7 +546,7 @@ function AppInner() {
   const replayPanelContextRef = useRef<string | null>(null);
 
   const [activeChart, setActiveChart] = useState<string | null>(null);
-  const [layoutType, setLayoutType] = useState("2");
+  const [layoutType, setLayoutType] = useState(DEFAULT_LAYOUT_TYPE);
   
   // Replay engine state
   const [isReplay, setIsReplay] = useState(false);
@@ -437,6 +570,11 @@ function AppInner() {
     useState<ReplayHistoryStatus>("idle");
   const [replayHistoryMessage, setReplayHistoryMessage] = useState<string | null>(null);
   const [providerNotice, setProviderNotice] = useState<ProviderNotice | null>(null);
+  const [providerMode, setProviderMode] = useState<ProviderMode | null>(null);
+  const [providerCacheReady, setProviderCacheReady] = useState(false);
+  const [providerLiveSource, setProviderLiveSource] = useState<string | null>(null);
+  const [providerPollIntervalMs, setProviderPollIntervalMs] = useState<number | null>(null);
+  const [strictRealtime, setStrictRealtime] = useState(false);
   const [supportedSymbols, setSupportedSymbols] =
     useState<SupportedSymbol[]>(DEFAULT_SUPPORTED_SYMBOLS);
   const [supportedTimeframes, setSupportedTimeframes] =
@@ -444,12 +582,26 @@ function AppInner() {
   const [liveSupported, setLiveSupported] = useState(true);
   const [historyUiStates, setHistoryUiStates] =
     useState<Record<MarketContextKey, HistoryUiState>>({});
+  const [validationStatus, setValidationStatus] = useState<ValidationStatus>({
+    lastLiveEventTime: null,
+    lastMergeTime: null,
+    lastProviderError: null,
+  });
+
+  useEffect(() => {
+    relayFrontendDebugLog("startup", {
+      stage: "app:mounted",
+    });
+    relayFrontendDebugLog("validation:mode", {
+      enabled: FREE_TIER_VALIDATION_MODE,
+    });
+  }, []);
 
   const tool = useToolStore((state) => state.tool);
   const magnet = useToolStore((state) => state.magnet);
   const { theme } = useThemeStore();
   const { workspaces, setActiveWorkspace, createDefaultWorkspace } = useWorkspaceStore();
-  const { setData: setCandleData } = useCandleStore();
+  const { setData: setCandleData, loadFromCache: loadCandleDataFromCache } = useCandleStore();
   const panels = useLayoutState((state) => state.panels);
   const focusedPanelId = useLayoutState((state) => state.focusedPanelId);
   const layoutPanels = panels.length > 0 ? panels : DEFAULT_PANELS;
@@ -461,6 +613,13 @@ function AppInner() {
     () => getRequiredMarketContexts(visiblePanels),
     [visiblePanels]
   );
+  const effectiveRequiredContexts = useMemo(() => {
+    if (!FREE_TIER_VALIDATION_MODE) {
+      return requiredContexts;
+    }
+
+    return requiredContexts.slice(0, 1);
+  }, [requiredContexts]);
 
   const getReplayPanelState = useCallback(
     (panelId: string | null) => {
@@ -562,6 +721,65 @@ function AppInner() {
     []
   );
 
+  const recordValidationProviderError = useCallback((message: string) => {
+    if (!FREE_TIER_VALIDATION_MODE) {
+      return;
+    }
+
+    setValidationStatus((current) =>
+      current.lastProviderError === message
+        ? current
+        : {
+            ...current,
+            lastProviderError: message,
+          }
+    );
+  }, []);
+
+  const clearValidationProviderError = useCallback(() => {
+    if (!FREE_TIER_VALIDATION_MODE) {
+      return;
+    }
+
+    setValidationStatus((current) =>
+      current.lastProviderError === null
+        ? current
+        : {
+            ...current,
+            lastProviderError: null,
+          }
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!FREE_TIER_VALIDATION_MODE || !providerNotice || providerNotice.tone !== "error") {
+      return;
+    }
+
+    recordValidationProviderError(providerNotice.message);
+  }, [providerNotice, recordValidationProviderError]);
+
+  useEffect(() => {
+    if (!FREE_TIER_VALIDATION_MODE) {
+      return;
+    }
+
+    let unlisten: UnlistenFn | null = null;
+
+    void listen<ProviderStatusEvent>("provider://status", (event) => {
+      const payload = event.payload;
+      if (payload.kind === "error") {
+        recordValidationProviderError(payload.message);
+      }
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, [recordValidationProviderError]);
+
   const setContextHistoryUiState = useCallback(
     (
       symbol: string,
@@ -626,6 +844,10 @@ function AppInner() {
     return loadedRangesRef.current[symbol]?.[timeframe] ?? createEmptyLoadedRange();
   }, []);
 
+  const getRetainedCandleCount = useCallback((symbol: string, timeframe: Timeframe) => {
+    return dataRef.current[symbol]?.[timeframe]?.length ?? 0;
+  }, []);
+
   const fetchHistoricalDeduped = useCallback(
     async (
       request: HistoricalRequest & {
@@ -634,12 +856,24 @@ function AppInner() {
     ): Promise<Candle[]> => {
       const { symbol, timeframe, from, to, limit, force = false } = request;
       const loaded = getRetainedLoadedRange(symbol, timeframe);
+      const retainedCount = getRetainedCandleCount(symbol, timeframe);
+      const requiredOpenEndedDepth =
+        from == null && to == null ? limit ?? historicalRequestLimit(timeframe) : 0;
+      const hasRequestedOpenEndedDepth =
+        requiredOpenEndedDepth === 0 || retainedCount >= requiredOpenEndedDepth;
 
-      if (!force && isRangeCovered(loaded, from, to)) {
+      if (!force && hasRequestedOpenEndedDepth && isRangeCovered(loaded, from, to)) {
         return [];
       }
 
-      const key = makeRangeRequestKey(symbol, timeframe, from, to, limit);
+      const key = makeRangeRequestKey(
+        providerMode ?? "unknown",
+        symbol,
+        timeframe,
+        from,
+        to,
+        limit
+      );
       const existing = inFlightHistoricalRequestsRef.current.get(key);
       if (existing) {
         return existing;
@@ -654,7 +888,7 @@ function AppInner() {
       inFlightHistoricalRequestsRef.current.set(key, promise);
       return promise;
     },
-    [getRetainedLoadedRange]
+    [getRetainedCandleCount, getRetainedLoadedRange, providerMode]
   );
 
   const applyHistoricalCandles = useCallback(
@@ -701,7 +935,7 @@ function AppInner() {
       }
 
       const step = timeframeSeconds(timeframe);
-      const limit = timeframe === "15s" ? 600 : timeframe === "1m" ? 500 : 400;
+      const limit = historicalRequestLimit(timeframe);
       const to = currentOldest - step;
 
       if (to <= 0) {
@@ -1286,12 +1520,27 @@ function AppInner() {
   }, [loadedRanges]);
 
   useEffect(() => {
-    requiredContextsRef.current = requiredContexts;
-  }, [requiredContexts]);
+    requiredContextsRef.current = effectiveRequiredContexts;
+  }, [effectiveRequiredContexts]);
 
   useEffect(() => {
     layoutPanelsRef.current = layoutPanels;
   }, [layoutPanels]);
+
+  useEffect(() => {
+    if (!FREE_TIER_VALIDATION_MODE) {
+      return;
+    }
+
+    if (layoutType !== DEFAULT_LAYOUT_TYPE) {
+      setLayoutType(DEFAULT_LAYOUT_TYPE);
+    }
+
+    const validationPanelId = layoutPanels[0]?.id ?? null;
+    if (validationPanelId && activeChart !== validationPanelId) {
+      setActiveChart(validationPanelId);
+    }
+  }, [activeChart, layoutPanels, layoutType]);
 
   useEffect(() => {
     activeChartRef.current = activeChart;
@@ -1306,7 +1555,9 @@ function AppInner() {
   }, [isReplaySync]);
 
   useEffect(() => {
-    const activeKeys = new Set<MarketContextKey>(requiredContexts.map((context) => context.key));
+    const activeKeys = new Set<MarketContextKey>(
+      effectiveRequiredContexts.map((context) => context.key)
+    );
 
     setHistoryUiStates((current) => {
       const nextEntries = Object.entries(current).filter(([key]) =>
@@ -1318,7 +1569,30 @@ function AppInner() {
 
       return Object.fromEntries(nextEntries) as Record<MarketContextKey, HistoryUiState>;
     });
-  }, [requiredContexts]);
+  }, [effectiveRequiredContexts]);
+
+  useEffect(() => {
+    if (!FREE_TIER_VALIDATION_MODE) {
+      return;
+    }
+
+    const blockedContexts = requiredContexts.slice(1).map((context) => context.key);
+    if (blockedContexts.length > 0) {
+      relayFrontendDebugLog("validation:contexts", {
+        action: "blocked_extra_contexts",
+        blockedContexts,
+      });
+    }
+
+    const activeValidationContext = effectiveRequiredContexts[0] ?? null;
+    if (activeValidationContext) {
+      relayFrontendDebugLog("validation:contexts", {
+        action: "active_context",
+        symbol: activeValidationContext.symbol,
+        timeframe: activeValidationContext.timeframe,
+      });
+    }
+  }, [effectiveRequiredContexts, requiredContexts]);
 
   useEffect(() => {
     const activePanel = activeChart
@@ -1356,6 +1630,20 @@ function AppInner() {
 
   // Initialize default workspace if none exist
   useEffect(() => {
+    if (FREE_TIER_VALIDATION_MODE) {
+      if (workspaces.length > 0) {
+        relayFrontendDebugLog("validation:workspace", {
+          action: "restore_skipped",
+          count: workspaces.length,
+        });
+      } else {
+        relayFrontendDebugLog("validation:workspace", {
+          action: "default_workspace_skipped",
+        });
+      }
+      return;
+    }
+
     if (workspaces.length > 0) return;
 
     const defaultWorkspace = {
@@ -1407,6 +1695,12 @@ function AppInner() {
           return sameTimeframes ? current : capabilities.supportedTimeframes;
         });
         setLiveSupported(capabilities.liveSupported);
+        setProviderCacheReady(false);
+        setProviderMode(capabilities.providerMode);
+        setProviderLiveSource(capabilities.liveSource ?? null);
+        setProviderPollIntervalMs(capabilities.pollIntervalMs ?? null);
+        setStrictRealtime(Boolean(capabilities.strictRealtime));
+        clearValidationProviderError();
 
         if (capabilities.notice) {
           showProviderNotice("warning", capabilities.notice);
@@ -1415,9 +1709,16 @@ function AppInner() {
         }
       } catch (error) {
         console.warn("[App] Falling back to default provider capabilities:", error);
+        recordValidationProviderError(
+          error instanceof Error ? error.message : String(error)
+        );
         if (!cancelled) {
           setSupportedTimeframes(DEFAULT_SUPPORTED_TIMEFRAMES);
           setLiveSupported(true);
+          setProviderCacheReady(true);
+          setProviderLiveSource(null);
+          setProviderPollIntervalMs(null);
+          setStrictRealtime(false);
           showProviderNotice("warning", "Using default provider capabilities while backend settings load.");
         }
       }
@@ -1428,16 +1729,48 @@ function AppInner() {
     return () => {
       cancelled = true;
     };
-  }, [clearProviderNotice, showProviderNotice]);
+  }, [
+    clearProviderNotice,
+    clearValidationProviderError,
+    recordValidationProviderError,
+    showProviderNotice,
+  ]);
+
+  useEffect(() => {
+    if (!providerMode) {
+      return;
+    }
+
+    const cachedData = readStoredData(providerMode);
+    const nextRanges = createLoadedRangesFromData(cachedData);
+
+    inFlightHistoricalRequestsRef.current.clear();
+    dataRef.current = cachedData;
+    loadedRangesRef.current = nextRanges;
+    setData(cachedData);
+    setLoadedRanges(nextRanges);
+    loadCandleDataFromCache(providerMode);
+    setProviderCacheReady(true);
+  }, [loadCandleDataFromCache, providerMode]);
 
   // Persist chart data to localStorage on every change
   useEffect(() => {
+    if (!providerMode || !providerCacheReady) {
+      return;
+    }
+
     try {
-      window.localStorage.setItem(DATA_STORAGE_KEY, JSON.stringify(data));
+      persistScopedCandleCache(
+        window.localStorage,
+        DATA_STORAGE_KEY,
+        LEGACY_DATA_STORAGE_KEYS,
+        providerMode,
+        data
+      );
     } catch (error) {
       console.error("[App] Failed to cache chart data:", error);
     }
-  }, [data]);
+  }, [data, providerCacheReady, providerMode]);
 
   // Apply theme CSS variables
   useEffect(() => {
@@ -1457,7 +1790,11 @@ function AppInner() {
     let historicalLoadFailed = false;
 
     async function ensureVisibleHistoryLoaded() {
-      for (const context of requiredContexts) {
+      if (!providerCacheReady) {
+        return;
+      }
+
+      for (const context of effectiveRequiredContexts) {
         try {
           const request = buildInitialHistoricalRequest(context.symbol, context.timeframe);
           const alreadyCovered = isRangeCovered(
@@ -1503,6 +1840,7 @@ function AppInner() {
           clearContextHistoryUiState(context.symbol, context.timeframe);
         } catch (error) {
           historicalLoadFailed = true;
+          recordValidationProviderError(error instanceof Error ? error.message : String(error));
           if (!cancelled) {
             setContextHistoryUiState(
               context.symbol,
@@ -1536,9 +1874,11 @@ function AppInner() {
     applyHistoricalCandles,
     clearContextHistoryUiState,
     clearProviderNotice,
+    effectiveRequiredContexts,
     fetchHistoricalDeduped,
     getRetainedLoadedRange,
-    requiredContexts,
+    providerCacheReady,
+    recordValidationProviderError,
     setContextHistoryUiState,
     showProviderNotice,
   ]);
@@ -1548,6 +1888,10 @@ function AppInner() {
     let subscriptionFailed = false;
 
     async function syncDemandDrivenSubscriptions() {
+      if (!providerCacheReady) {
+        return;
+      }
+
       const currentSubscriptions = liveSubscriptionsRef.current;
 
       if (!liveSupported) {
@@ -1569,10 +1913,31 @@ function AppInner() {
         return;
       }
 
-      const nextContexts = new Set(requiredContexts.map((context) => context.key));
+      const nextContexts = new Set(effectiveRequiredContexts.map((context) => context.key));
       const pendingSubscriptions = pendingLiveSubscriptionsRef.current;
 
-      for (const context of requiredContexts) {
+      for (const [key, subscription] of Array.from(currentSubscriptions.entries())) {
+        if (nextContexts.has(key)) {
+          continue;
+        }
+
+        try {
+          if (FREE_TIER_VALIDATION_MODE) {
+            relayFrontendDebugLog("validation:live", {
+              action: "unsubscribe_prior_poll",
+              key,
+            });
+          }
+          await subscription.unsubscribe();
+          currentSubscriptions.delete(key);
+        } catch (error) {
+          subscriptionFailed = true;
+          recordValidationProviderError(error instanceof Error ? error.message : String(error));
+          console.error(`[App] Live unsubscribe error for ${key}:`, error);
+        }
+      }
+
+      for (const context of effectiveRequiredContexts) {
         if (currentSubscriptions.has(context.key) || pendingSubscriptions.has(context.key)) {
           continue;
         }
@@ -1584,20 +1949,56 @@ function AppInner() {
             context.symbol,
             context.timeframe,
             (incoming) => {
+              if (FREE_TIER_VALIDATION_MODE) {
+                setValidationStatus((current) => ({
+                  ...current,
+                  lastLiveEventTime: incoming.time,
+                }));
+              }
+
               if (cancelled || !shouldApplyLiveUpdate(context.symbol, context.timeframe)) return;
 
               setData((prev) => {
                 const currentSymbolData = prev[context.symbol] ?? createEmptyTimeframeData();
-                const updated = upsertCandleSeries(
+                const merge = mergeLiveCandleSeries(
                   currentSymbolData[context.timeframe] ?? [],
-                  incoming
+                  incoming,
+                  context.timeframe
                 );
+
+                if (DEBUG_LIVE_UPDATES) {
+                  console.debug("[live:merge]", {
+                    symbol: context.symbol,
+                    timeframe: context.timeframe,
+                    time: incoming.time,
+                    close: incoming.close,
+                    action: merge.action,
+                  });
+                  relayFrontendDebugLog("live:merge", {
+                    symbol: context.symbol,
+                    timeframe: context.timeframe,
+                    time: incoming.time,
+                    close: incoming.close,
+                    action: merge.action,
+                  });
+                }
+
+                if (merge.action === "ignore") {
+                  return prev;
+                }
+
+                if (FREE_TIER_VALIDATION_MODE) {
+                  setValidationStatus((current) => ({
+                    ...current,
+                    lastMergeTime: incoming.time,
+                  }));
+                }
 
                 const nextState = {
                   ...prev,
                   [context.symbol]: {
                     ...currentSymbolData,
-                    [context.timeframe]: updated,
+                    [context.timeframe]: merge.candles,
                   },
                 };
 
@@ -1616,6 +2017,7 @@ function AppInner() {
               await subscription.unsubscribe();
             } catch (error) {
               subscriptionFailed = true;
+              recordValidationProviderError(error instanceof Error ? error.message : String(error));
               currentSubscriptions.set(context.key, subscription);
               console.error(`[App] Live unsubscribe error for ${context.key}:`, error);
             }
@@ -1623,25 +2025,13 @@ function AppInner() {
           }
 
           currentSubscriptions.set(context.key, subscription);
+          clearValidationProviderError();
         } catch (error) {
           subscriptionFailed = true;
+          recordValidationProviderError(error instanceof Error ? error.message : String(error));
           console.error(`[App] Live subscription error for ${context.key}:`, error);
         } finally {
           pendingSubscriptions.delete(context.key);
-        }
-      }
-
-      for (const [key, subscription] of Array.from(currentSubscriptions.entries())) {
-        if (nextContexts.has(key)) {
-          continue;
-        }
-
-        try {
-          await subscription.unsubscribe();
-          currentSubscriptions.delete(key);
-        } catch (error) {
-          subscriptionFailed = true;
-          console.error(`[App] Live unsubscribe error for ${key}:`, error);
         }
       }
 
@@ -1661,7 +2051,16 @@ function AppInner() {
     return () => {
       cancelled = true;
     };
-  }, [clearProviderNotice, liveSupported, requiredContexts, shouldApplyLiveUpdate, showProviderNotice]);
+  }, [
+    clearProviderNotice,
+    clearValidationProviderError,
+    effectiveRequiredContexts,
+    liveSupported,
+    providerCacheReady,
+    recordValidationProviderError,
+    shouldApplyLiveUpdate,
+    showProviderNotice,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -1675,6 +2074,10 @@ function AppInner() {
       }
     };
   }, []);
+
+  const validationActiveContext = FREE_TIER_VALIDATION_MODE
+    ? effectiveRequiredContexts[0] ?? layoutPanels[0] ?? null
+    : null;
 
   return (
     <div className="app-shell">
@@ -1725,7 +2128,52 @@ function AppInner() {
       <div style={{ display: "flex", height: "100%" }}>
         <Sidebar />
 
-        <div className="app-shell__viewport" style={{ flex: 1 }}>
+        <div className="app-shell__viewport" style={{ position: "relative", flex: 1 }}>
+          {FREE_TIER_VALIDATION_MODE && DEBUG_LIVE_UPDATES && (
+            <div
+              style={{
+                position: "absolute",
+                top: "12px",
+                right: "12px",
+                zIndex: 20,
+                minWidth: "260px",
+                padding: "10px 12px",
+                borderRadius: "10px",
+                border: "1px solid rgba(59, 130, 246, 0.25)",
+                background: "rgba(15, 23, 42, 0.92)",
+                color: "#dbeafe",
+                fontSize: "12px",
+                lineHeight: 1.5,
+                boxShadow: "0 16px 40px rgba(15, 23, 42, 0.32)",
+              }}
+            >
+              <div style={{ fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                Validation Mode
+              </div>
+              <div>
+                {validationActiveContext?.symbol?.toUpperCase() ?? "EURUSD"}{" "}
+                {validationActiveContext?.timeframe ?? "1m"}
+              </div>
+              <div>Provider: {providerMode ?? "loading"}</div>
+              <div>Live: {providerLiveSource ?? "real_poll"}</div>
+              <div>Poll: {providerPollIntervalMs ?? 15_000}ms</div>
+              <div>Strict: {strictRealtime ? "on" : "off"}</div>
+              <div>
+                Last event: {formatValidationTimestamp(validationStatus.lastLiveEventTime)}
+              </div>
+              <div>
+                Last merge: {formatValidationTimestamp(validationStatus.lastMergeTime)}
+              </div>
+              <div
+                style={{
+                  marginTop: "4px",
+                  color: validationStatus.lastProviderError ? "#fca5a5" : "#93c5fd",
+                }}
+              >
+                Error: {validationStatus.lastProviderError ?? "none"}
+              </div>
+            </div>
+          )}
           <LayoutManager
             data={data}
             layoutType={layoutType}

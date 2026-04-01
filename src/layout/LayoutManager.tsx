@@ -5,6 +5,7 @@ import { useLayoutState } from "../store/useLayoutState";
 import type { HistoryUiState, SupportedSymbol, Timeframe } from "../types/marketData";
 import {
   DEFAULT_PANELS,
+  FREE_TIER_VALIDATION_MODE,
   normalizeInstrumentId,
   sanitizePanelsForCapabilities,
 } from "../instruments";
@@ -361,7 +362,7 @@ export default function LayoutManager({
   isReplaySync,
   onReplayStart,
   supportedSymbols,
-  supportedTimeframes = ["15s", "1m", "3m"],
+  supportedTimeframes = ["1m", "3m"],
   showSessions,
   showSessionLevels,
   showSessionRanges,
@@ -415,6 +416,10 @@ export default function LayoutManager({
 
   // Load workspace when activeWorkspaceId changes
   useEffect(() => {
+    if (FREE_TIER_VALIDATION_MODE) {
+      return;
+    }
+
     if (!activeWorkspaceId) return;
 
     const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
@@ -448,6 +453,10 @@ export default function LayoutManager({
 
   // Auto-save workspace changes (debounced 1000ms)
   useEffect(() => {
+    if (FREE_TIER_VALIDATION_MODE) {
+      return;
+    }
+
     if (!activeWorkspaceId) return;
 
     const timer = setTimeout(() => {
@@ -804,6 +813,21 @@ export default function LayoutManager({
           <button onClick={() => setFocused(null)}>← Back</button>
         </div>
         <div className="focus-mode__content">{renderPanel(panel, () => setFocused(null))}</div>
+      </div>
+    );
+  }
+
+  if (FREE_TIER_VALIDATION_MODE || layoutType === "1" || panels.length <= 1) {
+    const panel = panels[0];
+    if (!panel) {
+      return null;
+    }
+
+    return (
+      <div className="layout-engine">
+        <div style={{ position: "absolute", inset: 0 }}>
+          {renderPanel(panel, () => setFocused(panel.id))}
+        </div>
       </div>
     );
   }

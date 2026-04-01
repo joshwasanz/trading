@@ -1,6 +1,7 @@
 import Chart from "../Chart";
 import type { Candle, HistoryUiState, SupportedSymbol, Timeframe } from "../types/marketData";
 import type { ReplayStartPayload } from "../types/replay";
+import { filterSupportedTimeframesForInstrument } from "../instruments";
 import type {
   ChartDrawings,
   Drawing,
@@ -85,7 +86,7 @@ export default function ChartPanel({
   onCommitPreviewDrawing,
   onFocus,
   supportedSymbols = [],
-  supportedTimeframes = ["15s", "1m", "3m"],
+  supportedTimeframes = ["1m", "3m"],
   onSymbolChange,
   onTimeframeChange,
   activeChart,
@@ -118,6 +119,7 @@ export default function ChartPanel({
   const symbolOptions = supportedSymbols.some((candidate) => candidate.id === symbol)
     ? supportedSymbols
     : [{ id: symbol, label: symbol.toUpperCase() }, ...supportedSymbols];
+  const timeframeOptions = filterSupportedTimeframesForInstrument(symbol, supportedTimeframes);
   const hasDrawings =
     drawings.trendlines.length > 0 ||
     drawings.rectangles.length > 0 ||
@@ -143,7 +145,7 @@ export default function ChartPanel({
 
         {/* Timeframe Selector */}
         <div style={{ display: "flex", gap: "2px", marginLeft: "8px" }}>
-          {supportedTimeframes.map((tf) => (
+          {timeframeOptions.map((tf) => (
             <button
               key={tf}
               onClick={() => onTimeframeChange?.(tf)}

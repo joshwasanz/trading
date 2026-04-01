@@ -1,8 +1,14 @@
 import { create } from "zustand";
-import type { Candle, Timeframe } from "../types/marketData";
-import { normalizeInstrumentId } from "../instruments";
+import type { Candle, ProviderMode, Timeframe } from "../types/marketData";
+import {
+  FREE_TIER_VALIDATION_MODE,
+  isValidationModeSymbolAllowed,
+  normalizeInstrumentId,
+} from "../instruments";
 import {
   clearLegacyMarketDataCaches,
+  loadScopedCandleCache,
+  persistScopedCandleCache,
   sanitizeCachedCandleData,
 } from "../utils/candleCache";
 
@@ -10,40 +16,58 @@ type CandleData = Record<string, Partial<Record<Timeframe, Candle[]>>>;
 
 type State = {
   data: CandleData;
+  providerMode: ProviderMode | null;
   setData: (symbol: string, tf: Timeframe, candles: Candle[]) => void;
-  loadFromCache: () => void;
+  loadFromCache: (providerMode: ProviderMode) => void;
 };
 
-const STORAGE_KEY = "candle_cache_v2";
-const LEGACY_STORAGE_KEYS = ["candle_cache_v1"];
+const STORAGE_KEY = "candle_cache_v3";
+const LEGACY_STORAGE_KEYS = ["candle_cache_v1", "candle_cache_v2"];
 
-function loadFromLocalStorage(): CandleData {
+function normalizeCachedData(value: unknown): CandleData {
+  return Object.entries(sanitizeCachedCandleData(value)).reduce<CandleData>(
+    (next, [symbol, series]) => {
+      const normalizedSymbol = normalizeInstrumentId(symbol);
+      if (FREE_TIER_VALIDATION_MODE && !isValidationModeSymbolAllowed(normalizedSymbol)) {
+        return next;
+      }
+
+      const filteredSeries = {
+        "1m": series["1m"],
+        "3m": series["3m"],
+      };
+
+      next[normalizedSymbol] = {
+        ...next[normalizedSymbol],
+        ...(FREE_TIER_VALIDATION_MODE ? filteredSeries : series),
+      };
+      return next;
+    },
+    {}
+  );
+}
+
+function loadFromLocalStorage(providerMode: ProviderMode): CandleData {
   if (typeof window === "undefined") return {};
 
   try {
-    clearLegacyMarketDataCaches(window.localStorage, LEGACY_STORAGE_KEYS);
-    const cached = window.localStorage.getItem(STORAGE_KEY);
-    if (cached) {
-      return Object.entries(sanitizeCachedCandleData(JSON.parse(cached))).reduce<CandleData>(
-        (next, [symbol, series]) => {
-          next[normalizeInstrumentId(symbol)] = {
-            ...next[normalizeInstrumentId(symbol)],
-            ...series,
-          };
-          return next;
-        },
-        {}
-      );
-    }
+    return normalizeCachedData(
+      loadScopedCandleCache(
+        window.localStorage,
+        STORAGE_KEY,
+        LEGACY_STORAGE_KEYS,
+        providerMode
+      )
+    );
   } catch (error) {
     console.error("[CandleStore] Failed to load cache:", error);
+    return {};
   }
-
-  return {};
 }
 
 export const useCandleStore = create<State>((set) => ({
-  data: loadFromLocalStorage(),
+  data: {},
+  providerMode: null,
 
   setData: (symbol, tf, candles) =>
     set((state) => {
@@ -57,7 +81,17 @@ export const useCandleStore = create<State>((set) => ({
 
       // Persist to localStorage
       try {
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+        if (state.providerMode) {
+          persistScopedCandleCache(
+            window.localStorage,
+            STORAGE_KEY,
+            LEGACY_STORAGE_KEYS,
+            state.providerMode,
+            updated
+          );
+        } else {
+          clearLegacyMarketDataCaches(window.localStorage, LEGACY_STORAGE_KEYS);
+        }
       } catch (error) {
         console.error("[CandleStore] Failed to save cache:", error);
       }
@@ -65,8 +99,8 @@ export const useCandleStore = create<State>((set) => ({
       return { data: updated };
     }),
 
-  loadFromCache: () => {
-    const cached = loadFromLocalStorage();
-    set({ data: cached });
+  loadFromCache: (providerMode) => {
+    const cached = loadFromLocalStorage(providerMode);
+    set({ data: cached, providerMode });
   },
 }));

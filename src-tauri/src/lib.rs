@@ -3,12 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
 
@@ -17,6 +19,8 @@ static SYMBOL_STATES: LazyLock<Mutex<HashMap<String, SymbolState>>> =
 static LIVE_SUBSCRIPTIONS: LazyLock<Mutex<HashMap<StreamKey, usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static SYNTHETIC_SYMBOL_STREAMS: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static TWELVE_DATA_POLL_STREAMS: LazyLock<Mutex<HashMap<StreamKey, Arc<AtomicBool>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static MASSIVE_LIVE_WORKERS: LazyLock<Mutex<HashMap<AssetClass, Arc<AtomicBool>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -96,6 +100,23 @@ struct ProviderCapabilities {
     #[serde(rename = "liveSupported")]
     live_supported: bool,
     notice: Option<String>,
+    #[serde(rename = "validationMode")]
+    validation_mode: bool,
+    #[serde(rename = "strictRealtime")]
+    strict_realtime: bool,
+    #[serde(rename = "liveSource")]
+    live_source: Option<String>,
+    #[serde(rename = "pollIntervalMs")]
+    poll_interval_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProviderStatusEvent {
+    kind: String,
+    source: String,
+    symbol: Option<String>,
+    timeframe: Option<String>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -440,6 +461,66 @@ fn twelve_data_rest_base_url() -> String {
         .unwrap_or_else(|| "https://api.twelvedata.com".to_string())
 }
 
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn strict_realtime_enabled() -> bool {
+    env_flag("STRICT_REALTIME")
+}
+
+fn free_tier_validation_mode_enabled() -> bool {
+    env_flag("VITE_FREE_TIER_VALIDATION_MODE") || env_flag("FREE_TIER_VALIDATION_MODE")
+}
+
+fn free_tier_validation_allowed_symbols() -> &'static [&'static str] {
+    &["eurusd", "usdjpy"]
+}
+
+fn free_tier_validation_symbol_allowed(symbol: &str) -> bool {
+    free_tier_validation_allowed_symbols().contains(&symbol)
+}
+
+fn free_tier_validation_rejection(symbol: &str, timeframe: Timeframe) -> Option<String> {
+    if !free_tier_validation_mode_enabled() {
+        return None;
+    }
+
+    if !free_tier_validation_symbol_allowed(symbol) {
+        return Some(format!(
+            "Validation mode only supports EURUSD and USDJPY. Blocked {}.",
+            symbol.to_ascii_uppercase()
+        ));
+    }
+
+    if !matches!(timeframe, Timeframe::M1 | Timeframe::M3) {
+        return Some(format!(
+            "Validation mode only supports 1m and 3m for {}.",
+            symbol.to_ascii_uppercase()
+        ));
+    }
+
+    None
+}
+
+fn twelve_data_live_poll_interval() -> Duration {
+    let interval_ms = env::var("TWELVE_DATA_LIVE_POLL_INTERVAL_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(1_000, 60_000))
+        .unwrap_or(5_000);
+
+    Duration::from_millis(interval_ms)
+}
+
 fn log_first_massive_live_message(
     provider_identifier: &str,
     internal_symbol: &str,
@@ -555,6 +636,39 @@ fn instrument_definition(symbol: &str) -> Option<&'static InstrumentDefinition> 
         .find(|instrument| instrument.internal_id == symbol)
 }
 
+fn twelve_data_validation_timeframes_for_asset_class(
+    asset_class: AssetClass,
+) -> &'static [Timeframe] {
+    match asset_class {
+        AssetClass::Forex => &[Timeframe::M1, Timeframe::M3],
+        AssetClass::Index => &[Timeframe::M1],
+    }
+}
+
+fn twelve_data_validation_rejection(symbol: &str, timeframe: Timeframe) -> Option<String> {
+    let instrument = instrument_definition(symbol)?;
+    let allowed = twelve_data_validation_timeframes_for_asset_class(instrument.asset_class);
+
+    if allowed.contains(&timeframe) {
+        return None;
+    }
+
+    Some(match instrument.asset_class {
+        AssetClass::Forex => format!(
+            "Forex timeframe {} is disabled for Twelve Data validation. Use 1m or 3m.",
+            timeframe.as_str()
+        ),
+        AssetClass::Index => format!(
+            "Index timeframe {} is disabled for Twelve Data validation. Use 1m.",
+            timeframe.as_str()
+        ),
+    })
+}
+
+fn twelve_data_supported_timeframes() -> Vec<Timeframe> {
+    vec![Timeframe::M1, Timeframe::M3]
+}
+
 fn provider_ticker_for_symbol(symbol: &str) -> Result<String, String> {
     let instrument =
         instrument_definition(symbol).ok_or_else(|| format!("Unsupported symbol: {symbol}"))?;
@@ -619,6 +733,10 @@ fn supported_symbols() -> Vec<SupportedSymbol> {
     MARKET_INSTRUMENTS
         .iter()
         .filter(|instrument| instrument.enabled)
+        .filter(|instrument| {
+            !free_tier_validation_mode_enabled()
+                || free_tier_validation_symbol_allowed(instrument.internal_id)
+        })
         .map(|instrument| SupportedSymbol {
             id: instrument.internal_id.to_string(),
             label: instrument.label.to_string(),
@@ -629,6 +747,11 @@ fn supported_symbols() -> Vec<SupportedSymbol> {
 fn is_supported_symbol(symbol: &str) -> bool {
     instrument_definition(symbol)
         .map(|instrument| instrument.enabled)
+        .map(|enabled| {
+            enabled
+                && (!free_tier_validation_mode_enabled()
+                    || free_tier_validation_symbol_allowed(symbol))
+        })
         .unwrap_or(false)
 }
 
@@ -642,19 +765,88 @@ fn provider_capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
         provider_mode,
         supported_symbols: supported_symbols(),
-        supported_timeframes: Timeframe::all()
-            .iter()
-            .map(|timeframe| timeframe.as_str().to_string())
-            .collect(),
+        supported_timeframes: match configured_data_provider() {
+            DataProviderMode::Synthetic => Timeframe::all()
+                .iter()
+                .map(|timeframe| timeframe.as_str().to_string())
+                .collect(),
+            DataProviderMode::TwelveData => twelve_data_supported_timeframes()
+                .iter()
+                .map(|timeframe| timeframe.as_str().to_string())
+                .collect(),
+        },
         live_supported: true,
         notice: match configured_data_provider() {
-            DataProviderMode::TwelveData => Some(
-                "Twelve Data validation mode: historical candles use Twelve Data where supported; live updates remain synthetic in this pass."
-                    .to_string(),
-            ),
+            DataProviderMode::TwelveData => Some(if free_tier_validation_mode_enabled() {
+                format!(
+                    "Free-tier validation mode is active. Only one live forex chart is allowed at a time using EURUSD/USDJPY on 1m or 3m. STRICT_REALTIME={} disables fallback.",
+                    strict_realtime_enabled()
+                )
+            } else if strict_realtime_enabled() {
+                "Twelve Data mode: historical candles use REST where supported. Validation supports forex 1m/3m and index 1m. Unsupported combinations fail because STRICT_REALTIME=true."
+                    .to_string()
+            } else {
+                "Twelve Data mode: historical candles use REST where supported. Validation supports forex 1m/3m and index 1m. Unsupported combinations fall back to synthetic unless STRICT_REALTIME=true."
+                    .to_string()
+            }),
             DataProviderMode::Synthetic => None,
         },
+        validation_mode: free_tier_validation_mode_enabled(),
+        strict_realtime: strict_realtime_enabled(),
+        live_source: Some(match configured_data_provider() {
+            DataProviderMode::Synthetic => "synthetic".to_string(),
+            DataProviderMode::TwelveData => "real_poll".to_string(),
+        }),
+        poll_interval_ms: Some(twelve_data_live_poll_interval().as_millis() as u64),
     }
+}
+
+fn frontend_debug_log_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|path| path.join("live-debug.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("live-debug.log"))
+}
+
+fn append_frontend_debug_log_line(line: &str) {
+    println!("{line}");
+
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(frontend_debug_log_path())
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+fn clear_frontend_debug_log_file() {
+    let _ = fs::write(frontend_debug_log_path(), "");
+}
+
+fn runtime_debug_log(scope: &str, payload: impl AsRef<str>) {
+    append_frontend_debug_log_line(&format!("[runtime:{scope}] {}", payload.as_ref()));
+}
+
+fn emit_provider_status<R: Runtime>(
+    app: &AppHandle<R>,
+    kind: &str,
+    source: &str,
+    symbol: Option<&str>,
+    timeframe: Option<Timeframe>,
+    message: &str,
+) -> Result<(), String> {
+    app.emit(
+        "provider://status",
+        ProviderStatusEvent {
+            kind: kind.to_string(),
+            source: source.to_string(),
+            symbol: symbol.map(|value| value.to_string()),
+            timeframe: timeframe.map(|value| value.as_str().to_string()),
+            message: message.to_string(),
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn massive_api_key() -> Result<String, String> {
@@ -783,8 +975,8 @@ fn evolve_live_price(symbol: &str, time_millis: u64, previous_price: f64) -> f64
     (previous_price + pull + micro + momentum).max(1.0)
 }
 
-fn emit_candle(
-    app: &AppHandle,
+fn emit_candle<R: Runtime>(
+    app: &AppHandle<R>,
     symbol: &str,
     timeframe: Timeframe,
     candle: &Candle,
@@ -815,11 +1007,7 @@ fn generate_synthetic_historical_result(
 }
 
 fn should_try_twelve_data_historical(symbol: &str, timeframe: Timeframe) -> bool {
-    if matches!(timeframe, Timeframe::S15) {
-        return false;
-    }
-
-    matches!(symbol, "eurusd" | "usdjpy" | "spx" | "ndx")
+    twelve_data_validation_rejection(symbol, timeframe).is_none()
 }
 
 fn try_twelve_data_historical(
@@ -847,11 +1035,13 @@ fn try_twelve_data_historical(
 }
 
 fn subscribe_synthetic_live(
-    app: AppHandle,
+    app: AppHandle<impl Runtime>,
     symbol: String,
     timeframe: Timeframe,
     key: StreamKey,
 ) -> Result<(), String> {
+    enforce_single_live_subscription_for_validation_mode(&key);
+
     println!(
         "[data] subscribe_live symbol={} timeframe={} provider=synthetic",
         symbol,
@@ -934,6 +1124,383 @@ fn unsubscribe_synthetic_live(
     Ok(())
 }
 
+fn has_live_subscription(key: &StreamKey) -> bool {
+    LIVE_SUBSCRIPTIONS
+        .lock()
+        .ok()
+        .and_then(|subscriptions| subscriptions.get(key).copied())
+        .map(|count| count > 0)
+        .unwrap_or(false)
+}
+
+fn should_try_twelve_data_live(symbol: &str, timeframe: Timeframe) -> bool {
+    should_try_twelve_data_historical(symbol, timeframe)
+}
+
+fn is_same_candle(left: &Candle, right: &Candle) -> bool {
+    left.time == right.time
+        && left.open == right.open
+        && left.high == right.high
+        && left.low == right.low
+        && left.close == right.close
+}
+
+fn emit_twelve_data_live_candles<R: Runtime>(
+    app: &AppHandle<R>,
+    symbol: &str,
+    timeframe: Timeframe,
+    candles: &[Candle],
+    last_seen: &mut HashMap<u64, Candle>,
+) {
+    let active_times = candles
+        .iter()
+        .map(|candle| candle.time)
+        .collect::<HashSet<_>>();
+    last_seen.retain(|time, _| active_times.contains(time));
+
+    for candle in candles {
+        let should_emit = last_seen
+            .get(&candle.time)
+            .map(|previous| !is_same_candle(previous, candle))
+            .unwrap_or(true);
+
+        if should_emit {
+            store_symbol_state(symbol, candle.time, candle.close);
+            let _ = emit_candle(app, symbol, timeframe, candle);
+        }
+
+        last_seen.insert(candle.time, candle.clone());
+    }
+}
+
+fn clear_twelve_data_poll_stream(key: &StreamKey, should_run: &Arc<AtomicBool>) {
+    if let Ok(mut streams) = TWELVE_DATA_POLL_STREAMS.lock() {
+        let should_clear = streams
+            .get(key)
+            .map(|current| Arc::ptr_eq(current, should_run))
+            .unwrap_or(false);
+
+        if should_clear {
+            streams.remove(key);
+        }
+    }
+}
+
+fn enforce_single_live_subscription_for_validation_mode(active_key: &StreamKey) {
+    if !free_tier_validation_mode_enabled() {
+        return;
+    }
+
+    let removed_keys = {
+        let mut subscriptions = match LIVE_SUBSCRIPTIONS.lock() {
+            Ok(subscriptions) => subscriptions,
+            Err(_) => return,
+        };
+        let removed = subscriptions
+            .keys()
+            .filter(|key| *key != active_key)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for key in &removed {
+            subscriptions.remove(key);
+        }
+
+        removed
+    };
+
+    if removed_keys.is_empty() {
+        return;
+    }
+
+    let mut synthetic_symbols_to_check = HashSet::<String>::new();
+
+    for key in &removed_keys {
+        if let Ok(mut streams) = TWELVE_DATA_POLL_STREAMS.lock() {
+            if let Some(should_run) = streams.remove(key) {
+                should_run.store(false, Ordering::Relaxed);
+                println!(
+                    "[validation] unsubscribed prior live poll symbol={} timeframe={} reason=single_subscription_rule",
+                    key.symbol,
+                    key.timeframe.as_str()
+                );
+                continue;
+            }
+        }
+
+        synthetic_symbols_to_check.insert(key.symbol.clone());
+    }
+
+    for symbol in synthetic_symbols_to_check {
+        let has_remaining_subscription = LIVE_SUBSCRIPTIONS
+            .lock()
+            .ok()
+            .map(|subscriptions| {
+                subscriptions
+                    .iter()
+                    .any(|(key, count)| key.symbol == symbol && *count > 0)
+            })
+            .unwrap_or(false);
+
+        if has_remaining_subscription {
+            continue;
+        }
+
+        if let Ok(mut streams) = SYNTHETIC_SYMBOL_STREAMS.lock() {
+            if let Some(should_run) = streams.remove(&symbol) {
+                should_run.store(false, Ordering::Relaxed);
+                println!(
+                    "[validation] unsubscribed prior live poll symbol={} timeframe=* reason=single_subscription_rule",
+                    symbol
+                );
+            }
+        }
+    }
+}
+
+fn start_twelve_data_poll_stream<R: Runtime>(
+    app: AppHandle<R>,
+    symbol: String,
+    timeframe: Timeframe,
+    key: StreamKey,
+    should_run: Arc<AtomicBool>,
+    initial_candles: Vec<Candle>,
+) {
+    thread::spawn(move || {
+        let poll_interval = twelve_data_live_poll_interval();
+        let mut last_seen = HashMap::<u64, Candle>::new();
+        let mut pending_initial = Some(initial_candles);
+
+        println!(
+            "[twelve_data] live poll started symbol={} timeframe={} source=real_poll interval_ms={}",
+            symbol,
+            timeframe.as_str(),
+            poll_interval.as_millis()
+        );
+
+        while should_run.load(Ordering::Relaxed) {
+            if !has_live_subscription(&key) {
+                break;
+            }
+
+            let result = match pending_initial.take() {
+                Some(candles) => Ok(candles),
+                None => fetch_twelve_data_historical(&symbol, timeframe, None, None, Some(2)),
+            };
+
+            let sleep_for = match result {
+                Ok(candles) => {
+                    emit_twelve_data_live_candles(
+                        &app,
+                        &symbol,
+                        timeframe,
+                        &candles,
+                        &mut last_seen,
+                    );
+                    poll_interval
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[twelve_data] live poll error symbol={} timeframe={} source=real_poll error={}",
+                        symbol,
+                        timeframe.as_str(),
+                        error
+                    );
+                    let _ = emit_provider_status(
+                        &app,
+                        "error",
+                        "live_poll",
+                        Some(&symbol),
+                        Some(timeframe),
+                        &error,
+                    );
+                    Duration::from_secs(10)
+                }
+            };
+
+            if should_run.load(Ordering::Relaxed) && has_live_subscription(&key) {
+                thread::sleep(sleep_for);
+            }
+        }
+
+        clear_twelve_data_poll_stream(&key, &should_run);
+    });
+}
+
+fn fallback_or_error_for_twelve_data_live(
+    app: AppHandle<impl Runtime>,
+    symbol: String,
+    timeframe: Timeframe,
+    key: StreamKey,
+    reason: &str,
+) -> Result<(), String> {
+    if free_tier_validation_mode_enabled() || strict_realtime_enabled() {
+        eprintln!(
+            "[twelve_data] subscribe_live symbol={} timeframe={} source=disabled strict_realtime={} validation_mode={} reason={}",
+            symbol,
+            timeframe.as_str(),
+            strict_realtime_enabled(),
+            free_tier_validation_mode_enabled(),
+            reason
+        );
+        return Err(format!(
+            "Twelve Data live subscription unavailable for {}/{}: {reason}",
+            symbol,
+            timeframe.as_str()
+        ));
+    }
+
+    println!(
+        "[twelve_data] subscribe_live symbol={} timeframe={} source=synthetic_fallback strict_realtime=false reason={}",
+        symbol,
+        timeframe.as_str(),
+        reason
+    );
+    subscribe_synthetic_live(app, symbol, timeframe, key)
+}
+
+fn subscribe_twelve_data_live(
+    app: AppHandle<impl Runtime>,
+    symbol: String,
+    timeframe: Timeframe,
+    key: StreamKey,
+) -> Result<(), String> {
+    enforce_single_live_subscription_for_validation_mode(&key);
+
+    let poll_already_running = TWELVE_DATA_POLL_STREAMS
+        .lock()
+        .map_err(|_| "twelve data live registry lock failed".to_string())?
+        .contains_key(&key);
+
+    if poll_already_running {
+        println!(
+            "[twelve_data] subscribe_live symbol={} timeframe={} source=real_poll",
+            symbol,
+            timeframe.as_str()
+        );
+        let mut subscriptions = LIVE_SUBSCRIPTIONS
+            .lock()
+            .map_err(|_| "live subscription registry lock failed".to_string())?;
+        let entry = subscriptions.entry(key).or_insert(0);
+        *entry += 1;
+        return Ok(());
+    }
+
+    if !should_try_twelve_data_live(&symbol, timeframe) {
+        return fallback_or_error_for_twelve_data_live(
+            app,
+            symbol,
+            timeframe,
+            key,
+            "rest_poll_not_supported",
+        );
+    }
+
+    let initial_candles =
+        match fetch_twelve_data_historical(&symbol, timeframe, None, None, Some(2)) {
+            Ok(candles) if !candles.is_empty() => candles,
+            Ok(_) => {
+                return fallback_or_error_for_twelve_data_live(
+                    app,
+                    symbol,
+                    timeframe,
+                    key,
+                    "empty_response",
+                )
+            }
+            Err(error) => {
+                return fallback_or_error_for_twelve_data_live(app, symbol, timeframe, key, &error)
+            }
+        };
+
+    println!(
+        "[twelve_data] subscribe_live symbol={} timeframe={} source=real_poll",
+        symbol,
+        timeframe.as_str()
+    );
+
+    {
+        let mut subscriptions = LIVE_SUBSCRIPTIONS
+            .lock()
+            .map_err(|_| "live subscription registry lock failed".to_string())?;
+        let entry = subscriptions.entry(key.clone()).or_insert(0);
+        *entry += 1;
+    }
+
+    let should_start = {
+        let mut streams = TWELVE_DATA_POLL_STREAMS
+            .lock()
+            .map_err(|_| "twelve data live registry lock failed".to_string())?;
+
+        if streams.contains_key(&key) {
+            None
+        } else {
+            let should_run = Arc::new(AtomicBool::new(true));
+            streams.insert(key.clone(), should_run.clone());
+            Some(should_run)
+        }
+    };
+
+    if let Some(should_run) = should_start {
+        start_twelve_data_poll_stream(app, symbol, timeframe, key, should_run, initial_candles);
+    }
+
+    Ok(())
+}
+
+fn unsubscribe_twelve_data_live(
+    symbol: String,
+    timeframe: Timeframe,
+    key: StreamKey,
+) -> Result<(), String> {
+    println!(
+        "[twelve_data] unsubscribe_live symbol={} timeframe={} source=real_poll",
+        symbol,
+        timeframe.as_str()
+    );
+
+    let should_stop = {
+        let mut subscriptions = LIVE_SUBSCRIPTIONS
+            .lock()
+            .map_err(|_| "live subscription registry lock failed".to_string())?;
+
+        match subscriptions.get_mut(&key) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => {
+                subscriptions.remove(&key);
+                true
+            }
+            None => false,
+        }
+    };
+
+    if should_stop {
+        let should_run = {
+            let mut streams = TWELVE_DATA_POLL_STREAMS
+                .lock()
+                .map_err(|_| "twelve data live registry lock failed".to_string())?;
+            streams.remove(&key)
+        };
+
+        if let Some(should_run) = should_run {
+            should_run.store(false, Ordering::Relaxed);
+        }
+    }
+
+    Ok(())
+}
+
+fn is_twelve_data_poll_stream(key: &StreamKey) -> bool {
+    TWELVE_DATA_POLL_STREAMS
+        .lock()
+        .ok()
+        .map(|streams| streams.contains_key(key))
+        .unwrap_or(false)
+}
+
 fn active_timeframes_for_symbol(symbol: &str) -> ActiveTimeframes {
     let mut active = ActiveTimeframes::default();
 
@@ -985,7 +1552,11 @@ fn current_candle_snapshot(symbol: &str, timeframe: Timeframe) -> Candle {
         })
 }
 
-fn start_synthetic_symbol_stream(app: AppHandle, symbol: String, should_run: Arc<AtomicBool>) {
+fn start_synthetic_symbol_stream<R: Runtime>(
+    app: AppHandle<R>,
+    symbol: String,
+    should_run: Arc<AtomicBool>,
+) {
     let stream_symbol = symbol.clone();
 
     thread::spawn(move || {
@@ -1326,25 +1897,36 @@ fn fetch_twelve_data_historical(
     let default_limit = 300usize;
     let max_limit = 5_000usize;
     let requested_limit = limit.unwrap_or(default_limit).clamp(1, max_limit);
-    let effective_to = align_timestamp(to.unwrap_or(now), timeframe);
-    let effective_from = match from {
-        Some(value) => align_timestamp(value, timeframe),
-        None => effective_to
-            .saturating_sub((requested_limit as u64).saturating_sub(1) * timeframe.duration()),
-    };
-
-    if effective_from > effective_to {
-        return Ok(Vec::new());
-    }
-
     let factor = (timeframe.duration() / raw_step_seconds) as usize;
-    let raw_to = if factor == 1 {
-        effective_to
+    let use_provider_latest_window = from.is_none() && to.is_none();
+    let requested_window = if use_provider_latest_window {
+        None
     } else {
-        effective_to.saturating_add(timeframe.duration() - raw_step_seconds)
+        let effective_to = align_timestamp(to.unwrap_or(now), timeframe);
+        let effective_from = match from {
+            Some(value) => align_timestamp(value, timeframe),
+            None => effective_to
+                .saturating_sub((requested_limit as u64).saturating_sub(1) * timeframe.duration()),
+        };
+
+        if effective_from > effective_to {
+            return Ok(Vec::new());
+        }
+
+        let raw_to = if factor == 1 {
+            effective_to
+        } else {
+            effective_to.saturating_add(timeframe.duration() - raw_step_seconds)
+        };
+
+        Some((effective_from, effective_to, raw_to))
     };
-    let raw_limit = (((raw_to.saturating_sub(effective_from)) / raw_step_seconds) as usize + 1)
-        .max(requested_limit.saturating_mul(factor))
+    let raw_limit = requested_window
+        .map(|(effective_from, _, raw_to)| {
+            (((raw_to.saturating_sub(effective_from)) / raw_step_seconds) as usize + 1)
+                .max(requested_limit.saturating_mul(factor))
+        })
+        .unwrap_or_else(|| requested_limit.saturating_mul(factor))
         .clamp(1, max_limit);
     let request_url = format!("{}/time_series", twelve_data_rest_base_url());
 
@@ -1353,7 +1935,7 @@ fn fetch_twelve_data_historical(
         .build()
         .map_err(|error| format!("Failed to build Twelve Data HTTP client: {error}"))?;
 
-    let query = vec![
+    let mut query = vec![
         ("symbol", provider_ticker.clone()),
         ("interval", interval.to_string()),
         ("apikey", api_key),
@@ -1361,12 +1943,15 @@ fn fetch_twelve_data_historical(
         ("order", "ASC".to_string()),
         ("format", "JSON".to_string()),
         ("outputsize", raw_limit.to_string()),
-        (
+    ];
+
+    if let Some((effective_from, _, raw_to)) = requested_window {
+        query.push((
             "start_date",
             format_timestamp_for_twelve_data(effective_from),
-        ),
-        ("end_date", format_timestamp_for_twelve_data(raw_to)),
-    ];
+        ));
+        query.push(("end_date", format_timestamp_for_twelve_data(raw_to)));
+    }
 
     let response = client
         .get(request_url)
@@ -1457,7 +2042,10 @@ fn fetch_twelve_data_historical(
     };
 
     candles.sort_by_key(|candle| candle.time);
-    candles.retain(|candle| candle.time >= effective_from && candle.time <= effective_to);
+
+    if let Some((effective_from, effective_to, _)) = requested_window {
+        candles.retain(|candle| candle.time >= effective_from && candle.time <= effective_to);
+    }
 
     if candles.len() > requested_limit {
         let split_index = candles.len() - requested_limit;
@@ -1982,6 +2570,11 @@ fn get_provider_capabilities() -> ProviderCapabilities {
 }
 
 #[tauri::command]
+fn frontend_debug_log(scope: String, payload: String) {
+    append_frontend_debug_log_line(&format!("[frontend:{scope}] {payload}"));
+}
+
+#[tauri::command]
 fn get_historical(
     symbol: String,
     timeframe: String,
@@ -1995,12 +2588,22 @@ fn get_historical(
         }
     }
 
+    let timeframe = Timeframe::parse(&timeframe)
+        .ok_or_else(|| format!("Unsupported timeframe: {timeframe}"))?;
+
+    if let Some(reason) = free_tier_validation_rejection(&symbol, timeframe) {
+        eprintln!(
+            "[validation] blocked get_historical symbol={} timeframe={} reason={}",
+            symbol,
+            timeframe.as_str(),
+            reason
+        );
+        return Err(reason);
+    }
+
     if !is_supported_symbol(&symbol) {
         return Err(format!("Unsupported symbol: {symbol}"));
     }
-
-    let timeframe = Timeframe::parse(&timeframe)
-        .ok_or_else(|| format!("Unsupported timeframe: {timeframe}"))?;
 
     match configured_data_provider() {
         DataProviderMode::Synthetic => {
@@ -2014,10 +2617,39 @@ fn get_historical(
             ))
         }
         DataProviderMode::TwelveData => {
-            if should_try_twelve_data_historical(&symbol, timeframe) {
+            if let Some(reason) = twelve_data_validation_rejection(&symbol, timeframe) {
+                if free_tier_validation_mode_enabled() || strict_realtime_enabled() {
+                    eprintln!(
+                        "[twelve_data] historical disabled symbol={} timeframe={} strict_realtime={} validation_mode={} reason={}",
+                        symbol,
+                        timeframe.as_str(),
+                        strict_realtime_enabled(),
+                        free_tier_validation_mode_enabled(),
+                        reason
+                    );
+                    return Err(reason);
+                }
+
+                println!(
+                    "[twelve_data] fallback to synthetic symbol={} timeframe={} reason={}",
+                    symbol,
+                    timeframe.as_str(),
+                    reason
+                );
+                Ok(generate_synthetic_historical_result(
+                    &symbol, timeframe, from, to, limit,
+                ))
+            } else if should_try_twelve_data_historical(&symbol, timeframe) {
                 match try_twelve_data_historical(&symbol, timeframe, from, to, limit) {
                     Ok(candles) if !candles.is_empty() => Ok(candles),
                     Ok(_) => {
+                        if free_tier_validation_mode_enabled() {
+                            return Err(format!(
+                                "Twelve Data historical unavailable for {}/{}: empty_response",
+                                symbol,
+                                timeframe.as_str()
+                            ));
+                        }
                         println!(
                             "[twelve_data] fallback to synthetic symbol={} timeframe={} reason=empty_response",
                             symbol,
@@ -2028,6 +2660,9 @@ fn get_historical(
                         ))
                     }
                     Err(error) => {
+                        if free_tier_validation_mode_enabled() {
+                            return Err(error);
+                        }
                         println!(
                             "[twelve_data] fallback to synthetic symbol={} timeframe={} reason={}",
                             symbol,
@@ -2040,6 +2675,13 @@ fn get_historical(
                     }
                 }
             } else {
+                if free_tier_validation_mode_enabled() {
+                    return Err(format!(
+                        "Twelve Data historical unavailable for {}/{}: rest_validation_not_enabled",
+                        symbol,
+                        timeframe.as_str()
+                    ));
+                }
                 println!(
                     "[twelve_data] fallback to synthetic symbol={} timeframe={} reason=rest_validation_not_enabled",
                     symbol,
@@ -2055,12 +2697,30 @@ fn get_historical(
 
 #[tauri::command]
 fn subscribe_live(app: AppHandle, symbol: String, timeframe: String) -> Result<(), String> {
+    subscribe_live_with_app(app, symbol, timeframe)
+}
+
+fn subscribe_live_with_app<R: Runtime>(
+    app: AppHandle<R>,
+    symbol: String,
+    timeframe: String,
+) -> Result<(), String> {
+    let timeframe = Timeframe::parse(&timeframe)
+        .ok_or_else(|| format!("Unsupported timeframe: {timeframe}"))?;
+
+    if let Some(reason) = free_tier_validation_rejection(&symbol, timeframe) {
+        eprintln!(
+            "[validation] blocked subscribe_live symbol={} timeframe={} reason={}",
+            symbol,
+            timeframe.as_str(),
+            reason
+        );
+        return Err(reason);
+    }
+
     if !is_supported_symbol(&symbol) {
         return Err(format!("Unsupported symbol: {symbol}"));
     }
-
-    let timeframe = Timeframe::parse(&timeframe)
-        .ok_or_else(|| format!("Unsupported timeframe: {timeframe}"))?;
     let key = StreamKey {
         symbol: symbol.clone(),
         timeframe,
@@ -2069,24 +2729,33 @@ fn subscribe_live(app: AppHandle, symbol: String, timeframe: String) -> Result<(
     match configured_data_provider() {
         DataProviderMode::Synthetic => subscribe_synthetic_live(app, symbol, timeframe, key),
         DataProviderMode::TwelveData => {
-            println!(
-                "[twelve_data] subscribe_live symbol={} timeframe={} source=synthetic_fallback",
-                symbol,
-                timeframe.as_str()
-            );
-            subscribe_synthetic_live(app, symbol, timeframe, key)
+            if let Some(reason) = twelve_data_validation_rejection(&symbol, timeframe) {
+                fallback_or_error_for_twelve_data_live(app, symbol, timeframe, key, &reason)
+            } else {
+                subscribe_twelve_data_live(app, symbol, timeframe, key)
+            }
         }
     }
 }
 
 #[tauri::command]
 fn unsubscribe_live(symbol: String, timeframe: String) -> Result<(), String> {
+    let timeframe = Timeframe::parse(&timeframe)
+        .ok_or_else(|| format!("Unsupported timeframe: {timeframe}"))?;
+
+    if let Some(reason) = free_tier_validation_rejection(&symbol, timeframe) {
+        eprintln!(
+            "[validation] blocked unsubscribe_live symbol={} timeframe={} reason={}",
+            symbol,
+            timeframe.as_str(),
+            reason
+        );
+        return Err(reason);
+    }
+
     if !is_supported_symbol(&symbol) {
         return Err(format!("Unsupported symbol: {symbol}"));
     }
-
-    let timeframe = Timeframe::parse(&timeframe)
-        .ok_or_else(|| format!("Unsupported timeframe: {timeframe}"))?;
     let key = StreamKey {
         symbol: symbol.clone(),
         timeframe,
@@ -2095,32 +2764,85 @@ fn unsubscribe_live(symbol: String, timeframe: String) -> Result<(), String> {
     match configured_data_provider() {
         DataProviderMode::Synthetic => unsubscribe_synthetic_live(symbol, timeframe, key),
         DataProviderMode::TwelveData => {
-            println!(
-                "[twelve_data] unsubscribe_live symbol={} timeframe={} source=synthetic_fallback",
-                symbol,
-                timeframe.as_str()
-            );
-            unsubscribe_synthetic_live(symbol, timeframe, key)
+            if is_twelve_data_poll_stream(&key) {
+                unsubscribe_twelve_data_live(symbol, timeframe, key)
+            } else {
+                println!(
+                    "[twelve_data] unsubscribe_live symbol={} timeframe={} source=synthetic_fallback",
+                    symbol,
+                    timeframe.as_str()
+                );
+                unsubscribe_synthetic_live(symbol, timeframe, key)
+            }
         }
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    clear_frontend_debug_log_file();
+    runtime_debug_log("startup", "cleared debug log");
+    runtime_debug_log(
+        "startup",
+        format!(
+            "frontend_mode={}",
+            env::var("VITE_STARTUP_DIAGNOSTICS_MODE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "full".to_string())
+        ),
+    );
+    runtime_debug_log(
+        "startup",
+        format!(
+            "free_tier_validation_mode={}",
+            free_tier_validation_mode_enabled()
+        ),
+    );
+
     match configured_data_provider() {
         DataProviderMode::Synthetic => {
             println!("[data] startup provider=synthetic");
         }
         DataProviderMode::TwelveData => {
-            println!(
-                "[twelve_data] provider mode active historical_source=twelve_data_rest_with_synthetic_fallback live_source=synthetic"
-            );
+            if free_tier_validation_mode_enabled() {
+                println!(
+                    "[validation] free-tier mode active provider=twelve_data live_source=real_poll poll_interval_ms={}",
+                    twelve_data_live_poll_interval().as_millis()
+                );
+            }
+
+            if strict_realtime_enabled() {
+                println!(
+                    "[twelve_data] provider mode active historical_source=twelve_data_rest_with_synthetic_fallback live_source=twelve_data_rest_poll_strict"
+                );
+            } else {
+                println!(
+                    "[twelve_data] provider mode active historical_source=twelve_data_rest_with_synthetic_fallback live_source=twelve_data_rest_poll_with_synthetic_fallback"
+                );
+            }
         }
     }
 
     tauri::Builder::default()
+        .setup(|_app| {
+            runtime_debug_log("setup", "tauri setup complete");
+            Ok(())
+        })
+        .on_page_load(|webview, payload| {
+            runtime_debug_log(
+                "page_load",
+                format!(
+                    "window={} event={:?} url={}",
+                    webview.label(),
+                    payload.event(),
+                    payload.url()
+                ),
+            );
+        })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            frontend_debug_log,
             get_provider_capabilities,
             get_supported_symbols,
             get_historical,
@@ -2129,4 +2851,341 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Deserialize)]
+struct DebugSmokeLiveCandleEvent {
+    symbol: String,
+    timeframe: String,
+    time: u64,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+}
+
+#[cfg(debug_assertions)]
+pub fn run_twelve_data_usdjpy_live_smoke() -> Result<(), String> {
+    use std::collections::HashMap;
+    use std::sync::mpsc;
+    use std::time::Instant;
+    use tauri::Listener;
+
+    let symbol = "usdjpy".to_string();
+    let timeframe = Timeframe::M1;
+    let timeframe_str = timeframe.as_str().to_string();
+    let key = StreamKey {
+        symbol: symbol.clone(),
+        timeframe,
+    };
+
+    std::env::set_var("DATA_PROVIDER", "twelve_data");
+    std::env::set_var("STRICT_REALTIME", "true");
+
+    twelve_data_api_key()?;
+
+    let app = tauri::test::mock_app();
+    let event_name = format!("candle://{symbol}/{timeframe_str}");
+    let (tx, rx) = mpsc::channel::<DebugSmokeLiveCandleEvent>();
+    let _listener = app.listen_any(event_name.clone(), move |event: tauri::Event| {
+        let payload = serde_json::from_str::<DebugSmokeLiveCandleEvent>(event.payload()).unwrap();
+        tx.send(payload).unwrap();
+    });
+
+    println!(
+        "[smoke] subscribing symbol={} timeframe={} strict_realtime={} poll_interval_ms={}",
+        symbol,
+        timeframe_str,
+        strict_realtime_enabled(),
+        twelve_data_live_poll_interval().as_millis()
+    );
+    subscribe_live_with_app(app.handle().clone(), symbol.clone(), timeframe_str.clone())?;
+
+    if !is_twelve_data_poll_stream(&key) {
+        return Err(
+            "expected Twelve Data poll stream registry to contain the active stream".into(),
+        );
+    }
+    if SYNTHETIC_SYMBOL_STREAMS
+        .lock()
+        .map_err(|_| "synthetic stream registry lock failed".to_string())?
+        .contains_key(symbol.as_str())
+    {
+        return Err(format!("unexpected synthetic stream for {symbol}"));
+    }
+
+    let initial_collection_deadline = Instant::now() + Duration::from_secs(20);
+    let mut events = Vec::<DebugSmokeLiveCandleEvent>::new();
+
+    while Instant::now() < initial_collection_deadline && events.len() < 2 {
+        if let Ok(event) = rx.recv_timeout(Duration::from_secs(1)) {
+            println!(
+                "[smoke] initial event symbol={} timeframe={} time={} open={} high={} low={} close={}",
+                event.symbol,
+                event.timeframe,
+                event.time,
+                event.open,
+                event.high,
+                event.low,
+                event.close
+            );
+            events.push(event);
+        }
+    }
+
+    if events.is_empty() {
+        return Err("expected at least one live event after subscribing".into());
+    }
+
+    let initial_latest_time = events.iter().map(|event| event.time).max().unwrap_or(0);
+    let rollover_deadline = Instant::now()
+        + Duration::from_secs(timeframe.duration() - (current_timestamp() % timeframe.duration()))
+        + twelve_data_live_poll_interval()
+        + Duration::from_secs(2);
+
+    println!(
+        "[smoke] waiting_for_rollover_until_unix={} initial_latest_time={}",
+        current_timestamp()
+            + rollover_deadline
+                .saturating_duration_since(Instant::now())
+                .as_secs(),
+        initial_latest_time
+    );
+
+    while Instant::now() < rollover_deadline {
+        if let Ok(event) = rx.recv_timeout(Duration::from_secs(1)) {
+            println!(
+                "[smoke] followup event symbol={} timeframe={} time={} open={} high={} low={} close={}",
+                event.symbol,
+                event.timeframe,
+                event.time,
+                event.open,
+                event.high,
+                event.low,
+                event.close
+            );
+            events.push(event);
+        }
+    }
+
+    let mut saw_revision = false;
+    let mut last_by_time = HashMap::<u64, DebugSmokeLiveCandleEvent>::new();
+    for event in &events {
+        if let Some(previous) = last_by_time.get(&event.time) {
+            if previous.open != event.open
+                || previous.high != event.high
+                || previous.low != event.low
+                || previous.close != event.close
+            {
+                saw_revision = true;
+            }
+        }
+
+        last_by_time.insert(event.time, event.clone());
+    }
+
+    let saw_rollover = events.iter().any(|event| event.time > initial_latest_time);
+    println!(
+        "[smoke] summary total_events={} saw_revision={} saw_rollover={}",
+        events.len(),
+        saw_revision,
+        saw_rollover
+    );
+
+    unsubscribe_live(symbol.clone(), timeframe_str.clone())?;
+    println!(
+        "[smoke] unsubscribed symbol={} timeframe={}",
+        symbol, timeframe_str
+    );
+
+    if is_twelve_data_poll_stream(&key) {
+        return Err(
+            "expected Twelve Data poll stream registry to be empty after unsubscribe".into(),
+        );
+    }
+    if has_live_subscription(&key) {
+        return Err("expected live subscription registry to be empty after unsubscribe".into());
+    }
+
+    let post_unsubscribe_event = rx.recv_timeout(Duration::from_secs(2)).ok();
+    println!(
+        "[smoke] post_unsubscribe_event_received={}",
+        post_unsubscribe_event.is_some()
+    );
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use std::collections::HashMap;
+    use std::sync::mpsc;
+    use std::time::Instant;
+    use tauri::Listener;
+
+    #[derive(Debug, Clone, Deserialize)]
+    struct TestLiveCandleEvent {
+        symbol: String,
+        timeframe: String,
+        time: u64,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+    }
+
+    #[test]
+    #[ignore = "requires Twelve Data API access and waits for realtime polling"]
+    fn twelve_data_usdjpy_live_smoke() {
+        let symbol = "usdjpy".to_string();
+        let timeframe = Timeframe::M1;
+        let timeframe_str = timeframe.as_str().to_string();
+        let key = StreamKey {
+            symbol: symbol.clone(),
+            timeframe,
+        };
+
+        std::env::set_var("DATA_PROVIDER", "twelve_data");
+        std::env::set_var("STRICT_REALTIME", "true");
+
+        assert!(
+            twelve_data_api_key().is_ok(),
+            "TWELVE_DATA_API_KEY must be set to run this smoke test"
+        );
+
+        let app = tauri::test::mock_app();
+        let event_name = format!("candle://{symbol}/{timeframe_str}");
+        let (tx, rx) = mpsc::channel::<TestLiveCandleEvent>();
+        let _listener = app.listen_any(event_name.clone(), move |event: tauri::Event| {
+            let payload = serde_json::from_str::<TestLiveCandleEvent>(event.payload()).unwrap();
+            tx.send(payload).unwrap();
+        });
+
+        println!(
+            "[smoke] subscribing symbol={} timeframe={} strict_realtime={} poll_interval_ms={}",
+            symbol,
+            timeframe_str,
+            strict_realtime_enabled(),
+            twelve_data_live_poll_interval().as_millis()
+        );
+        subscribe_live_with_app(app.handle().clone(), symbol.clone(), timeframe_str.clone())
+            .unwrap();
+
+        assert!(
+            is_twelve_data_poll_stream(&key),
+            "expected Twelve Data poll stream registry to contain the active stream"
+        );
+        assert!(
+            !SYNTHETIC_SYMBOL_STREAMS
+                .lock()
+                .unwrap()
+                .contains_key(symbol.as_str()),
+            "unexpected synthetic stream for {symbol}"
+        );
+
+        let initial_collection_deadline = Instant::now() + Duration::from_secs(20);
+        let mut events = Vec::<TestLiveCandleEvent>::new();
+
+        while Instant::now() < initial_collection_deadline && events.len() < 2 {
+            if let Ok(event) = rx.recv_timeout(Duration::from_secs(1)) {
+                println!(
+                    "[smoke] initial event symbol={} timeframe={} time={} open={} high={} low={} close={}",
+                    event.symbol,
+                    event.timeframe,
+                    event.time,
+                    event.open,
+                    event.high,
+                    event.low,
+                    event.close
+                );
+                events.push(event);
+            }
+        }
+
+        assert!(
+            !events.is_empty(),
+            "expected at least one live event after subscribing"
+        );
+
+        let initial_latest_time = events.iter().map(|event| event.time).max().unwrap_or(0);
+        let rollover_deadline = Instant::now()
+            + Duration::from_secs(
+                timeframe.duration() - (current_timestamp() % timeframe.duration()),
+            )
+            + twelve_data_live_poll_interval()
+            + Duration::from_secs(2);
+
+        println!(
+            "[smoke] waiting_for_rollover_until_unix={} initial_latest_time={}",
+            current_timestamp()
+                + rollover_deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_secs(),
+            initial_latest_time
+        );
+
+        while Instant::now() < rollover_deadline {
+            if let Ok(event) = rx.recv_timeout(Duration::from_secs(1)) {
+                println!(
+                    "[smoke] followup event symbol={} timeframe={} time={} open={} high={} low={} close={}",
+                    event.symbol,
+                    event.timeframe,
+                    event.time,
+                    event.open,
+                    event.high,
+                    event.low,
+                    event.close
+                );
+                events.push(event);
+            }
+        }
+
+        let mut saw_revision = false;
+        let mut last_by_time = HashMap::<u64, TestLiveCandleEvent>::new();
+        for event in &events {
+            if let Some(previous) = last_by_time.get(&event.time) {
+                if previous.open != event.open
+                    || previous.high != event.high
+                    || previous.low != event.low
+                    || previous.close != event.close
+                {
+                    saw_revision = true;
+                }
+            }
+
+            last_by_time.insert(event.time, event.clone());
+        }
+
+        let saw_rollover = events.iter().any(|event| event.time > initial_latest_time);
+        println!(
+            "[smoke] summary total_events={} saw_revision={} saw_rollover={}",
+            events.len(),
+            saw_revision,
+            saw_rollover
+        );
+
+        unsubscribe_live(symbol.clone(), timeframe_str.clone()).unwrap();
+        println!(
+            "[smoke] unsubscribed symbol={} timeframe={}",
+            symbol, timeframe_str
+        );
+
+        assert!(
+            !is_twelve_data_poll_stream(&key),
+            "expected Twelve Data poll stream registry to be empty after unsubscribe"
+        );
+        assert!(
+            !has_live_subscription(&key),
+            "expected live subscription registry to be empty after unsubscribe"
+        );
+
+        let post_unsubscribe_event = rx.recv_timeout(Duration::from_secs(2)).ok();
+        println!(
+            "[smoke] post_unsubscribe_event_received={}",
+            post_unsubscribe_event.is_some()
+        );
+    }
 }

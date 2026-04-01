@@ -16,6 +16,16 @@ export type InstrumentPanel = {
   timeframe: Timeframe;
 };
 
+export const FREE_TIER_VALIDATION_MODE =
+  import.meta.env.VITE_FREE_TIER_VALIDATION_MODE === "true";
+export const VALIDATION_ALLOWED_SYMBOL_IDS = ["eurusd", "usdjpy"] as const;
+export const VALIDATION_DEFAULT_PANEL: InstrumentPanel = {
+  id: "A",
+  symbol: "eurusd",
+  timeframe: "1m",
+};
+export const DEFAULT_LAYOUT_TYPE = FREE_TIER_VALIDATION_MODE ? "1" : "2";
+
 export const INSTRUMENT_DEFINITIONS: InstrumentDefinition[] = [
   { id: "eurusd", label: "EUR/USD", assetClass: "forex", enabled: true },
   { id: "usdjpy", label: "USD/JPY", assetClass: "forex", enabled: true },
@@ -28,30 +38,102 @@ export const INSTRUMENT_DEFINITIONS: InstrumentDefinition[] = [
   { id: "dji", label: "Dow Jones", assetClass: "index", enabled: false },
 ];
 
+let instrumentIdAliasesCache: Record<string, string> | null = null;
+
+function getInstrumentIdAliases(): Record<string, string> {
+  if (instrumentIdAliasesCache) {
+    return instrumentIdAliasesCache;
+  }
+
+  instrumentIdAliasesCache = Object.fromEntries(
+    INSTRUMENT_DEFINITIONS.flatMap((instrument) =>
+      (instrument.aliases ?? []).map((alias) => [alias, instrument.id])
+    )
+  ) as Record<string, string>;
+
+  return instrumentIdAliasesCache;
+}
+
+export function normalizeInstrumentId(symbol: string): string {
+  const normalized = symbol.trim().toLowerCase();
+  return getInstrumentIdAliases()[normalized] ?? normalized;
+}
+
+export function isValidationModeSymbolAllowed(symbol: string): boolean {
+  const normalized = normalizeInstrumentId(symbol);
+  return (VALIDATION_ALLOWED_SYMBOL_IDS as readonly string[]).includes(normalized);
+}
+
+export function validationModeRejection(
+  symbol: string,
+  timeframe: Timeframe
+): string | null {
+  if (!FREE_TIER_VALIDATION_MODE) {
+    return null;
+  }
+
+  const normalizedSymbol = normalizeInstrumentId(symbol);
+  const validationSymbol = normalizedSymbol.trim().toLowerCase();
+  if (!isValidationModeSymbolAllowed(validationSymbol)) {
+    return `Validation mode only supports EURUSD and USDJPY. Blocked ${normalizedSymbol.toUpperCase()}.`;
+  }
+
+  if (!["1m", "3m"].includes(timeframe)) {
+    return `Validation mode only supports 1m and 3m for ${normalizedSymbol.toUpperCase()}.`;
+  }
+
+  return null;
+}
+
 export const DEFAULT_SUPPORTED_SYMBOLS: SupportedSymbol[] = INSTRUMENT_DEFINITIONS
   .filter((instrument) => instrument.enabled)
+  .filter((instrument) => !FREE_TIER_VALIDATION_MODE || isValidationModeSymbolAllowed(instrument.id))
   .map(({ id, label }) => ({ id, label }));
 
 export const DEFAULT_SUPPORTED_SYMBOL_IDS = DEFAULT_SUPPORTED_SYMBOLS.map(({ id }) => id);
 
-export const DEFAULT_PANELS: InstrumentPanel[] = [
-  { id: "A", symbol: "eurusd", timeframe: "15s" },
-  { id: "B", symbol: "spx", timeframe: "15s" },
-  { id: "C", symbol: "usdjpy", timeframe: "1m" },
-  { id: "D", symbol: "ndx", timeframe: "1m" },
-  { id: "E", symbol: "eurusd", timeframe: "3m" },
-  { id: "F", symbol: "spx", timeframe: "3m" },
-];
+export const DEFAULT_PANELS: InstrumentPanel[] = FREE_TIER_VALIDATION_MODE
+  ? [VALIDATION_DEFAULT_PANEL]
+  : [
+      { id: "A", symbol: "eurusd", timeframe: "1m" },
+      { id: "B", symbol: "spx", timeframe: "1m" },
+      { id: "C", symbol: "usdjpy", timeframe: "1m" },
+      { id: "D", symbol: "ndx", timeframe: "1m" },
+      { id: "E", symbol: "eurusd", timeframe: "3m" },
+      { id: "F", symbol: "usdjpy", timeframe: "3m" },
+    ];
 
-const INSTRUMENT_ID_ALIASES = Object.fromEntries(
-  INSTRUMENT_DEFINITIONS.flatMap((instrument) =>
-    (instrument.aliases ?? []).map((alias) => [alias, instrument.id])
-  )
-) as Record<string, string>;
+function instrumentDefinitionForSymbol(symbol: string): InstrumentDefinition | undefined {
+  const normalized = normalizeInstrumentId(symbol);
+  return INSTRUMENT_DEFINITIONS.find((instrument) => instrument.id === normalized);
+}
 
-export function normalizeInstrumentId(symbol: string): string {
-  const normalized = symbol.trim().toLowerCase();
-  return INSTRUMENT_ID_ALIASES[normalized] ?? normalized;
+export function instrumentAssetClassForSymbol(symbol: string): InstrumentAssetClass | null {
+  return instrumentDefinitionForSymbol(symbol)?.assetClass ?? null;
+}
+
+export function allowedTimeframesForInstrument(symbol: string): Timeframe[] {
+  if (FREE_TIER_VALIDATION_MODE) {
+    return isValidationModeSymbolAllowed(symbol) ? ["1m", "3m"] : [];
+  }
+
+  switch (instrumentAssetClassForSymbol(symbol)) {
+    case "forex":
+      return ["1m", "3m"];
+    case "index":
+      return ["1m"];
+    default:
+      return ["1m", "3m"];
+  }
+}
+
+export function filterSupportedTimeframesForInstrument(
+  symbol: string,
+  supportedTimeframes: Timeframe[]
+): Timeframe[] {
+  const allowed = new Set(allowedTimeframesForInstrument(symbol));
+  const filtered = supportedTimeframes.filter((timeframe) => allowed.has(timeframe));
+  return filtered.length > 0 ? filtered : allowedTimeframesForInstrument(symbol);
 }
 
 export function normalizeInstrumentPanels<T extends { symbol: string }>(panels: T[]): T[] {
@@ -69,19 +151,39 @@ export function sanitizePanelsForCapabilities<T extends { symbol: string; timefr
   const normalizedPanels = normalizeInstrumentPanels(panels);
   const normalizedSymbols = supportedSymbols.map((symbol) => normalizeInstrumentId(symbol.id));
   const allowedSymbols = new Set(normalizedSymbols);
-  const allowedTimeframes = new Set(supportedTimeframes);
   const fallbackSymbol = normalizedSymbols[0] ?? DEFAULT_SUPPORTED_SYMBOL_IDS[0] ?? "eurusd";
-  const fallbackTimeframe = supportedTimeframes[0] ?? "1m";
+
+  if (FREE_TIER_VALIDATION_MODE) {
+    const seedPanel = normalizedPanels[0] ?? ({ ...VALIDATION_DEFAULT_PANEL } as unknown as T);
+    const symbol =
+      allowedSymbols.has(seedPanel.symbol) && isValidationModeSymbolAllowed(seedPanel.symbol)
+        ? seedPanel.symbol
+        : fallbackSymbol;
+    const allowedTimeframes = filterSupportedTimeframesForInstrument(symbol, supportedTimeframes);
+    const timeframe = allowedTimeframes.includes(seedPanel.timeframe)
+      ? seedPanel.timeframe
+      : allowedTimeframes[0] ?? VALIDATION_DEFAULT_PANEL.timeframe;
+
+    return [
+      {
+        ...seedPanel,
+        id: "A",
+        symbol,
+        timeframe,
+      },
+    ] as T[];
+  }
 
   return normalizedPanels.map((panel, index) => {
     const symbol =
       allowedSymbols.size === 0 || allowedSymbols.has(panel.symbol)
         ? panel.symbol
         : normalizedSymbols[index % normalizedSymbols.length] ?? fallbackSymbol;
-    const timeframe =
-      allowedTimeframes.size === 0 || allowedTimeframes.has(panel.timeframe)
-        ? panel.timeframe
-        : fallbackTimeframe;
+    const allowedTimeframes = filterSupportedTimeframesForInstrument(symbol, supportedTimeframes);
+    const fallbackTimeframe = allowedTimeframes[0] ?? "1m";
+    const timeframe = allowedTimeframes.includes(panel.timeframe)
+      ? panel.timeframe
+      : fallbackTimeframe;
 
     return {
       ...panel,

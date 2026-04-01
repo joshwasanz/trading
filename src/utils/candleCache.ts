@@ -1,4 +1,4 @@
-import type { Candle, Timeframe } from "../types/marketData";
+import type { Candle, ProviderMode, Timeframe } from "../types/marketData";
 
 export type CandleCacheData = Record<string, Partial<Record<Timeframe, Candle[]>>>;
 
@@ -104,6 +104,36 @@ export function sanitizeCachedCandleData(value: unknown): CandleCacheData {
   }
 
   return sanitized;
+}
+
+export function getScopedMarketDataStorageKey(baseKey: string, providerMode: ProviderMode) {
+  return `${baseKey}:${providerMode}`;
+}
+
+export function loadScopedCandleCache(
+  storage: Storage,
+  baseKey: string,
+  legacyKeys: string[],
+  providerMode: ProviderMode
+): CandleCacheData {
+  clearLegacyMarketDataCaches(storage, legacyKeys);
+  const cached = storage.getItem(getScopedMarketDataStorageKey(baseKey, providerMode));
+  if (!cached) {
+    return {};
+  }
+
+  return sanitizeCachedCandleData(JSON.parse(cached));
+}
+
+export function persistScopedCandleCache(
+  storage: Storage,
+  baseKey: string,
+  legacyKeys: string[],
+  providerMode: ProviderMode,
+  data: CandleCacheData
+) {
+  clearLegacyMarketDataCaches(storage, legacyKeys);
+  storage.setItem(getScopedMarketDataStorageKey(baseKey, providerMode), JSON.stringify(data));
 }
 
 export function clearLegacyMarketDataCaches(storage: Storage, keys: string[]) {

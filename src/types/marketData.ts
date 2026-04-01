@@ -22,6 +22,10 @@ export type ProviderCapabilities = {
   supportedTimeframes: Timeframe[];
   liveSupported: boolean;
   notice: string | null;
+  validationMode?: boolean;
+  strictRealtime?: boolean;
+  liveSource?: string | null;
+  pollIntervalMs?: number | null;
 };
 
 export type HistoricalRequest = {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   createChart,
   CrosshairMode,
@@ -48,6 +49,19 @@ import {
   isTextDrawing,
 } from "./types/drawings";
 import { findCandleIndexAtOrBefore } from "./utils/replay";
+
+const DEBUG_CHART_UPDATES = import.meta.env.DEV;
+
+function relayChartDebugLog(scope: string, payload: Record<string, unknown>) {
+  if (!DEBUG_CHART_UPDATES) {
+    return;
+  }
+
+  void invoke("frontend_debug_log", {
+    scope,
+    payload: JSON.stringify(payload),
+  }).catch(() => undefined);
+}
 
 function getTimeframeSeconds(timeframe: ReplayStartPayload["timeframe"]): number {
   switch (timeframe) {
@@ -2434,12 +2448,13 @@ export default function Chart({
   ]);
 
   useEffect(() => {
-    if (!seriesRef.current || !chartRef.current || !smaSeriesRef.current) return;
+    if (!seriesRef.current || !chartRef.current || !smaSeriesRef.current || !chartReady) return;
 
     // LIVE DATA LEAK FIX: Prevent inactive charts from updating during independent replay
     try {
       // Priority: use live data if available, otherwise fallback to historical from store
       const candlesFromStore = candleStoreData[symbol]?.[timeframe] ?? [];
+      const displaySource = data.length > 0 ? "prop" : "store";
       let displayData: Candle[] = data.length > 0
         ? data
         : candlesFromStore;
@@ -2466,6 +2481,7 @@ export default function Chart({
       const incrementalLiveCandle = shouldApplyReplay
         ? null
         : getIncrementalLiveCandle(displayedDataRef.current, displayData);
+      const previousDisplayedData = displayedDataRef.current;
       const normalizedSmaPeriod = sanitizeIndicatorPeriod(smaPeriod);
       const previousSmaState = smaStateRef.current;
       const smaStateChanged =
@@ -2490,8 +2506,35 @@ export default function Chart({
 
       if (incrementalLiveCandle) {
         seriesRef.current.update(toChartCandle(incrementalLiveCandle));
+        relayChartDebugLog("chart:series:update", {
+          chartId,
+          symbol,
+          timeframe,
+          mode: "update",
+          action:
+            previousDisplayedData[previousDisplayedData.length - 1]?.time === incrementalLiveCandle.time
+              ? "replace"
+              : "append",
+          time: incrementalLiveCandle.time,
+          close: incrementalLiveCandle.close,
+          points: displayData.length,
+          source: displaySource,
+          replay: shouldApplyReplay,
+        });
       } else {
         seriesRef.current.setData(displayData.map(toChartCandle));
+        relayChartDebugLog("chart:series:update", {
+          chartId,
+          symbol,
+          timeframe,
+          mode: "setData",
+          action: "reload",
+          time: displayData[displayData.length - 1]?.time ?? null,
+          close: displayData[displayData.length - 1]?.close ?? null,
+          points: displayData.length,
+          source: displaySource,
+          replay: shouldApplyReplay,
+        });
       }
 
       smaSeriesRef.current.applyOptions({
@@ -2543,6 +2586,7 @@ export default function Chart({
   }, [
     activeChart,
     candleStoreData,
+    chartReady,
     chartId,
     data,
     hasNoEarlierReplayData,

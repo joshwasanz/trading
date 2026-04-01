@@ -1,6 +1,7 @@
 import { useThemeStore } from "../store/useThemeStore";
 import { useWorkspaceStore } from "../store/useWorkspaceStore";
 import { useLayoutState } from "../store/useLayoutState";
+import { FREE_TIER_VALIDATION_MODE } from "../instruments";
 import type { SessionKey } from "../utils/sessions";
 import type { Workspace } from "../types/workspace";
 import { formatReplayTime } from "../utils/replayDisplay";
@@ -134,13 +135,20 @@ export default function TopBar({
         className="ui-dropdown"
         title="Select layout"
       >
-        <option value="2">2 Charts</option>
-        <option value="3">3 Charts</option>
-        <option value="6">6 Charts</option>
+        {FREE_TIER_VALIDATION_MODE ? (
+          <option value="1">1 Chart</option>
+        ) : (
+          <>
+            <option value="2">2 Charts</option>
+            <option value="3">3 Charts</option>
+            <option value="6">6 Charts</option>
+          </>
+        )}
       </select>
 
       {/* ================= WORKSPACE ================= */}
-      <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
+      {!FREE_TIER_VALIDATION_MODE && (
+        <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
         {/* Save Workspace */}
         <button
           className="ui-button"
@@ -201,7 +209,8 @@ export default function TopBar({
             🗑 Delete
           </button>
         )}
-      </div>
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: "4px", alignItems: "center", marginLeft: "12px" }}>
         <button
