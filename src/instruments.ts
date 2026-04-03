@@ -78,8 +78,8 @@ export function validationModeRejection(
     return `Validation mode only supports EURUSD and USDJPY. Blocked ${normalizedSymbol.toUpperCase()}.`;
   }
 
-  if (!["1m", "3m"].includes(timeframe)) {
-    return `Validation mode only supports 1m and 3m for ${normalizedSymbol.toUpperCase()}.`;
+  if (!["15s", "1m", "3m"].includes(timeframe)) {
+    return `Validation mode only supports 15s, 1m, and 3m for ${normalizedSymbol.toUpperCase()}.`;
   }
 
   return null;
@@ -114,16 +114,14 @@ export function instrumentAssetClassForSymbol(symbol: string): InstrumentAssetCl
 
 export function allowedTimeframesForInstrument(symbol: string): Timeframe[] {
   if (FREE_TIER_VALIDATION_MODE) {
-    return isValidationModeSymbolAllowed(symbol) ? ["1m", "3m"] : [];
+    return isValidationModeSymbolAllowed(symbol) ? ["15s", "1m", "3m"] : [];
   }
 
   switch (instrumentAssetClassForSymbol(symbol)) {
     case "forex":
-      return ["1m", "3m"];
     case "index":
-      return ["1m"];
     default:
-      return ["1m", "3m"];
+      return ["15s", "1m", "3m"];
   }
 }
 

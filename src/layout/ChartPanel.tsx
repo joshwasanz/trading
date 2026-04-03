@@ -1,5 +1,11 @@
 import Chart from "../Chart";
-import type { Candle, HistoryUiState, SupportedSymbol, Timeframe } from "../types/marketData";
+import type {
+  Candle,
+  HistoryUiState,
+  ProviderMode,
+  SupportedSymbol,
+  Timeframe,
+} from "../types/marketData";
 import type { ReplayStartPayload } from "../types/replay";
 import { filterSupportedTimeframesForInstrument } from "../instruments";
 import type {
@@ -68,6 +74,8 @@ type Props = {
   showSessionRanges?: boolean;
   showSma?: boolean;
   smaPeriod?: number;
+  fastTickEnabled?: boolean;
+  providerMode?: ProviderMode | null;
 };
 
 export default function ChartPanel({
@@ -86,7 +94,7 @@ export default function ChartPanel({
   onCommitPreviewDrawing,
   onFocus,
   supportedSymbols = [],
-  supportedTimeframes = ["1m", "3m"],
+  supportedTimeframes = ["15s", "1m", "3m"],
   onSymbolChange,
   onTimeframeChange,
   activeChart,
@@ -114,6 +122,8 @@ export default function ChartPanel({
   showSessionRanges = true,
   showSma = false,
   smaPeriod = 20,
+  fastTickEnabled = false,
+  providerMode = null,
 }: Props) {
   const chartId = panelId;
   const symbolOptions = supportedSymbols.some((candidate) => candidate.id === symbol)
@@ -269,6 +279,8 @@ export default function ChartPanel({
           showSessionRanges={showSessionRanges}
           showSma={showSma}
           smaPeriod={smaPeriod}
+          fastTickEnabled={fastTickEnabled}
+          providerMode={providerMode}
         />
       </div>
     </div>

@@ -578,9 +578,9 @@ fn free_tier_validation_rejection(symbol: &str, timeframe: Timeframe) -> Option<
         ));
     }
 
-    if !matches!(timeframe, Timeframe::M1 | Timeframe::M3) {
+    if !matches!(timeframe, Timeframe::S15 | Timeframe::M1 | Timeframe::M3) {
         return Some(format!(
-            "Validation mode only supports 1m and 3m for {}.",
+            "Validation mode only supports 15s, 1m, and 3m for {}.",
             symbol.to_ascii_uppercase()
         ));
     }
@@ -743,7 +743,11 @@ fn twelve_data_validation_rejection(symbol: &str, timeframe: Timeframe) -> Optio
 }
 
 fn twelve_data_supported_timeframes() -> Vec<Timeframe> {
-    vec![Timeframe::M1, Timeframe::M3]
+    if free_tier_validation_mode_enabled() || strict_realtime_enabled() {
+        vec![Timeframe::M1, Timeframe::M3]
+    } else {
+        vec![Timeframe::S15, Timeframe::M1, Timeframe::M3]
+    }
 }
 
 fn provider_ticker_for_symbol(symbol: &str) -> Result<String, String> {
@@ -2327,6 +2331,31 @@ fn generate_synthetic_historical_candles(
     let actual_count = total_candles_in_range.min(requested_limit);
     let first_time =
         effective_to.saturating_sub((actual_count as u64).saturating_sub(1).saturating_mul(step));
+
+    if !matches!(timeframe, Timeframe::S15) {
+        let source_step = Timeframe::S15.duration();
+        let source_to = effective_to.saturating_add(step.saturating_sub(source_step));
+        let source_count = ((source_to - first_time) / source_step) as usize + 1;
+        let source_candles = generate_synthetic_historical_candles(
+            symbol,
+            Timeframe::S15,
+            Some(first_time),
+            Some(source_to),
+            Some(source_count),
+        );
+        let mut aggregated = aggregate_candles(source_candles, timeframe);
+
+        if aggregated.len() > actual_count {
+            aggregated = aggregated[aggregated.len() - actual_count..].to_vec();
+        }
+
+        if let Some(last_candle) = aggregated.last() {
+            store_symbol_state(symbol, last_candle.time, last_candle.close);
+        }
+
+        return aggregated;
+    }
+
     let warmup_steps = 120usize;
     let warmup_start = first_time.saturating_sub((warmup_steps as u64).saturating_mul(step));
     let mut price = base_price_for_symbol(symbol);

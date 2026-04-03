@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   createChart,
@@ -15,7 +15,7 @@ import {
 import { useToolStore } from "./store/useToolStore";
 import { useThemeStore } from "./store/useThemeStore";
 import DrawingStylePanel from "./components/DrawingStylePanel";
-import type { Candle, HistoryUiState } from "./types/marketData";
+import type { Candle, HistoryUiState, ProviderMode } from "./types/marketData";
 import type { ReplayStartPayload } from "./types/replay";
 import {
   SESSION_CONFIG,
@@ -32,6 +32,10 @@ import {
   sanitizeIndicatorPeriod,
   type IndicatorPoint,
 } from "./utils/indicators";
+import {
+  subscribeToFastTicks,
+  type FastTickSubscription,
+} from "./utils/fastTickEngine";
 import { formatReplayTime } from "./utils/replayDisplay";
 import {
   DEFAULT_TRENDLINE_EXTENSION,
@@ -50,6 +54,9 @@ import {
 import { findCandleIndexAtOrBefore } from "./utils/replay";
 
 const DEBUG_CHART_UPDATES = import.meta.env.DEV;
+const FAST_TICK_DIAGNOSTICS =
+  DEBUG_CHART_UPDATES && import.meta.env.VITE_FAST_TICK_DIAGNOSTICS === "true";
+const FAST_TICK_ACTIVITY_SAMPLE_SIZE = 60;
 
 function relayChartDebugLog(scope: string, payload: Record<string, unknown>) {
   if (!DEBUG_CHART_UPDATES) {
@@ -137,6 +144,8 @@ type Props = {
   showSessionRanges?: boolean;
   showSma?: boolean;
   smaPeriod?: number;
+  fastTickEnabled?: boolean;
+  providerMode?: ProviderMode | null;
 };
 
 type ScreenPoint = {
@@ -436,6 +445,17 @@ function toLinePoint(point: IndicatorPoint): LineData<Time> {
   };
 }
 
+function candlesEquivalent(left: Candle, right: Candle): boolean {
+  return (
+    left.time === right.time &&
+    left.open === right.open &&
+    left.high === right.high &&
+    left.low === right.low &&
+    left.close === right.close &&
+    left.volume === right.volume
+  );
+}
+
 function getIncrementalLiveCandle(previous: Candle[], next: Candle[]): Candle | null {
   if (previous.length === 0 || next.length === 0) {
     return null;
@@ -447,19 +467,19 @@ function getIncrementalLiveCandle(previous: Candle[], next: Candle[]): Candle | 
     }
 
     for (let index = 0; index < next.length - 1; index += 1) {
-      if (previous[index] !== next[index]) {
+      if (!candlesEquivalent(previous[index], next[index])) {
         return null;
       }
     }
 
-    return previous[previous.length - 1] === next[next.length - 1]
+    return candlesEquivalent(previous[previous.length - 1], next[next.length - 1])
       ? null
       : next[next.length - 1] ?? null;
   }
 
   if (next.length === previous.length + 1) {
     for (let index = 0; index < previous.length; index += 1) {
-      if (previous[index] !== next[index]) {
+      if (!candlesEquivalent(previous[index], next[index])) {
         return null;
       }
     }
@@ -469,6 +489,62 @@ function getIncrementalLiveCandle(previous: Candle[], next: Candle[]): Candle | 
 
   return null;
 }
+
+function getFastTickSmaPoint(
+  candles: Candle[],
+  fastCandle: Candle,
+  period: number
+): IndicatorPoint | null {
+  const normalizedPeriod = sanitizeIndicatorPeriod(period);
+  if (candles.length === 0) {
+    return null;
+  }
+
+  const lastCandle = candles[candles.length - 1];
+  const replacesLast = lastCandle?.time === fastCandle.time;
+  const availableCount = replacesLast ? candles.length : candles.length + 1;
+
+  if (availableCount < normalizedPeriod) {
+    return null;
+  }
+
+  let sum = fastCandle.close;
+  let remaining = normalizedPeriod - 1;
+  let cursor = candles.length - (replacesLast ? 2 : 1);
+
+  while (remaining > 0 && cursor >= 0) {
+    sum += candles[cursor].close;
+    cursor -= 1;
+    remaining -= 1;
+  }
+
+  if (remaining > 0) {
+    return null;
+  }
+
+  return {
+    time: fastCandle.time,
+    value: sum / normalizedPeriod,
+  };
+}
+
+type FastTickBlockReason =
+  | "disabled"
+  | "chart_not_ready"
+  | "fresh_render_pending"
+  | "replay_active"
+  | "replay_selecting"
+  | "no_canonical_candle"
+  | "seed_mismatch"
+  | "running";
+
+type RenderContextState = {
+  symbol: string;
+  timeframe: ReplayStartPayload["timeframe"];
+  providerMode: ProviderMode | "unknown";
+  fastTickEnabled: boolean;
+  replayActive: boolean;
+};
 
 export default function Chart({
   data,
@@ -506,6 +582,8 @@ export default function Chart({
   showSessionRanges = true,
   showSma = false,
   smaPeriod = 20,
+  fastTickEnabled = false,
+  providerMode = null,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -517,6 +595,7 @@ export default function Chart({
   const initFrameRef = useRef<number | null>(null);
   const readyFrameRef = useRef<number | null>(null);
   const dataFitFrameRef = useRef<number | null>(null);
+  const scheduleOverlayDrawRef = useRef<() => void>(() => undefined);
   const hasInitialData = useRef(false);
   const pendingInitialFitRef = useRef(false);
   const chartReadyRef = useRef(false);
@@ -551,6 +630,15 @@ export default function Chart({
   const sessionReferenceTimeRef = useRef<number | null>(null);
   const activeSessionRef = useRef<ReturnType<typeof getSessionForTimestamp>>(null);
   const drawingsRef = useRef(drawings);
+  const fastRenderedCandleRef = useRef<Candle | null>(null);
+  const fastTickSubscriptionRef = useRef<FastTickSubscription | null>(null);
+  const forceFreshRenderRef = useRef(true);
+  const fastTickResumeBlockedRef = useRef(true);
+  const fastTickBlockReasonRef = useRef<FastTickBlockReason>("chart_not_ready");
+  const renderContextRef = useRef<RenderContextState | null>(null);
+  const fastTickSeriesUpdateCountRef = useRef(0);
+  const fastTickSmaUpdateCountRef = useRef(0);
+  const propSmaUpdateCountRef = useRef(0);
   const selectedDrawingRef = useRef<DrawingSelection | null>(null);
   const onAddTrendlineRef = useRef(onAddTrendline);
   const onAddRectangleRef = useRef(onAddRectangle);
@@ -602,6 +690,109 @@ export default function Chart({
     !isReplaySelectingForThisChart &&
     (fullData.length === 0 || hasNoEarlierReplayData) &&
     (historyLoading || historyFailed || historyEmpty);
+
+  const reportFastTickState = useCallback(
+    (reason: FastTickBlockReason, extra?: Record<string, unknown>) => {
+      if (!FAST_TICK_DIAGNOSTICS) {
+        fastTickBlockReasonRef.current = reason;
+        return;
+      }
+
+      if (fastTickBlockReasonRef.current === reason && !extra) {
+        return;
+      }
+
+      fastTickBlockReasonRef.current = reason;
+      relayChartDebugLog("chart:fast_tick", {
+        action: "state",
+        chartId,
+        symbol: symbolRef.current,
+        timeframe: timeframeRef.current,
+        providerMode: providerMode ?? "unknown",
+        reason,
+        ...extra,
+      });
+    },
+    [chartId, providerMode]
+  );
+
+  const recordSmaDiagnostic = useCallback(
+    (source: "fast_tick" | "prop_incremental", point: IndicatorPoint) => {
+      if (!FAST_TICK_DIAGNOSTICS) {
+        return;
+      }
+
+      const counterRef =
+        source === "fast_tick" ? fastTickSmaUpdateCountRef : propSmaUpdateCountRef;
+      counterRef.current += 1;
+
+      if (counterRef.current % FAST_TICK_ACTIVITY_SAMPLE_SIZE !== 0) {
+        return;
+      }
+
+      relayChartDebugLog("chart:sma", {
+        action: "incremental_update",
+        chartId,
+        symbol: symbolRef.current,
+        timeframe: timeframeRef.current,
+        providerMode: providerMode ?? "unknown",
+        source,
+        count: counterRef.current,
+        time: point.time,
+        value: point.value,
+      });
+    },
+    [chartId, providerMode]
+  );
+
+  const resetChartRenderState = useCallback(
+    (reason: string) => {
+      forceFreshRenderRef.current = true;
+      fastTickResumeBlockedRef.current = true;
+      fastTickSeriesUpdateCountRef.current = 0;
+      fastTickSmaUpdateCountRef.current = 0;
+      propSmaUpdateCountRef.current = 0;
+      fastRenderedCandleRef.current = null;
+      displayedDataRef.current = [];
+      dataRef.current = [];
+      sessionRangesRef.current = [];
+      sessionStatsRef.current = [];
+      smaDataRef.current = [];
+      sessionReferenceTimeRef.current = null;
+      activeSessionRef.current = null;
+      hasInitialData.current = false;
+      pendingInitialFitRef.current = false;
+
+      if (overlayFrameRef.current !== null) {
+        window.cancelAnimationFrame(overlayFrameRef.current);
+        overlayFrameRef.current = null;
+      }
+
+      if (dataFitFrameRef.current !== null) {
+        window.cancelAnimationFrame(dataFitFrameRef.current);
+        dataFitFrameRef.current = null;
+      }
+
+      seriesRef.current?.setData([]);
+      smaSeriesRef.current?.setData([]);
+
+      reportFastTickState("fresh_render_pending", {
+        action: "blocked_for_reset",
+        resetReason: reason,
+      });
+      if (FAST_TICK_DIAGNOSTICS) {
+        relayChartDebugLog("chart:reset", {
+          chartId,
+          symbol: symbolRef.current,
+          timeframe: timeframeRef.current,
+          providerMode: providerMode ?? "unknown",
+          reason,
+        });
+      }
+      scheduleOverlayDrawRef.current();
+    },
+    [chartId, providerMode, reportFastTickState]
+  );
 
   useEffect(() => {
     themeRef.current = theme;
@@ -664,6 +855,178 @@ export default function Chart({
     dataRef.current = data;
   }, [data]);
 
+  useLayoutEffect(() => {
+    if (!fastTickEnabled) {
+      fastRenderedCandleRef.current = null;
+      fastTickSubscriptionRef.current?.unsubscribe();
+      fastTickSubscriptionRef.current = null;
+      reportFastTickState("disabled", {
+        action: "detached",
+        cleanup: "fast_path_disabled",
+      });
+      return;
+    }
+
+    if (FAST_TICK_DIAGNOSTICS) {
+      relayChartDebugLog("chart:fast_tick", {
+        action: "attach",
+        chartId,
+        symbol,
+        timeframe,
+        providerMode: providerMode ?? "unknown",
+      });
+    }
+
+    const subscription = subscribeToFastTicks(symbol, timeframe, (tickCandle) => {
+      const series = seriesRef.current;
+      if (!series || !chartReadyRef.current) {
+        reportFastTickState("chart_not_ready");
+        return;
+      }
+
+      if (fastTickResumeBlockedRef.current || forceFreshRenderRef.current) {
+        reportFastTickState("fresh_render_pending");
+        return;
+      }
+
+      if (isReplaySelectingForThisChartRef.current) {
+        reportFastTickState("replay_selecting", {
+          action: "suppressed",
+        });
+        return;
+      }
+
+      const replayActive =
+        isReplayRef.current &&
+        (isReplaySyncRef.current || activeChartRef.current === chartId);
+      if (replayActive) {
+        reportFastTickState("replay_active", {
+          action: "suppressed",
+        });
+        return;
+      }
+
+      const currentData = displayedDataRef.current;
+      const latestCandle = currentData[currentData.length - 1];
+      if (!latestCandle) {
+        reportFastTickState("no_canonical_candle");
+        return;
+      }
+
+      const timeframeSeconds = getTimeframeSeconds(timeframeRef.current);
+      const replacesLastCandle = latestCandle.time === tickCandle.time;
+      const appendsNextCandle = latestCandle.time + timeframeSeconds === tickCandle.time;
+
+      if (!replacesLastCandle && !appendsNextCandle) {
+        reportFastTickState("seed_mismatch", {
+          latestCandleTime: latestCandle.time,
+          tickTime: tickCandle.time,
+          timeframeSeconds,
+        });
+        return;
+      }
+
+      reportFastTickState("running");
+      fastRenderedCandleRef.current = tickCandle;
+      series.update(toChartCandle(tickCandle));
+      fastTickSeriesUpdateCountRef.current += 1;
+
+      if (
+        FAST_TICK_DIAGNOSTICS &&
+        fastTickSeriesUpdateCountRef.current % FAST_TICK_ACTIVITY_SAMPLE_SIZE === 0
+      ) {
+        relayChartDebugLog("chart:fast_tick", {
+          action: "activity",
+          chartId,
+          symbol: symbolRef.current,
+          timeframe: timeframeRef.current,
+          providerMode: providerMode ?? "unknown",
+          kind: "series_update",
+          count: fastTickSeriesUpdateCountRef.current,
+          time: tickCandle.time,
+          close: tickCandle.close,
+        });
+      }
+
+      if (!showSmaRef.current || !smaSeriesRef.current) {
+        return;
+      }
+
+      const nextSmaPoint = getFastTickSmaPoint(
+        currentData,
+        tickCandle,
+        smaStateRef.current.period
+      );
+      if (!nextSmaPoint) {
+        return;
+      }
+
+      const nextSmaData = [...smaDataRef.current];
+      const previousPoint = nextSmaData[nextSmaData.length - 1];
+      if (previousPoint?.time === nextSmaPoint.time) {
+        nextSmaData[nextSmaData.length - 1] = nextSmaPoint;
+      } else {
+        nextSmaData.push(nextSmaPoint);
+      }
+
+      smaDataRef.current = nextSmaData;
+      smaSeriesRef.current.update(toLinePoint(nextSmaPoint));
+      recordSmaDiagnostic("fast_tick", nextSmaPoint);
+    });
+
+    fastTickSubscriptionRef.current = subscription;
+    reportFastTickState("fresh_render_pending", {
+      action: "attached",
+    });
+    return () => {
+      fastRenderedCandleRef.current = null;
+      subscription.unsubscribe();
+      if (FAST_TICK_DIAGNOSTICS) {
+        relayChartDebugLog("chart:fast_tick", {
+          action: "detach",
+          chartId,
+          symbol: symbolRef.current,
+          timeframe: timeframeRef.current,
+          providerMode: providerMode ?? "unknown",
+        });
+      }
+
+      if (fastTickSubscriptionRef.current === subscription) {
+        fastTickSubscriptionRef.current = null;
+      }
+    };
+  }, [
+    chartId,
+    fastTickEnabled,
+    providerMode,
+    recordSmaDiagnostic,
+    reportFastTickState,
+    symbol,
+    timeframe,
+  ]);
+
+  useLayoutEffect(() => {
+    if (!fastTickEnabled) {
+      return;
+    }
+
+    const latestCandle = data[data.length - 1] ?? null;
+    fastRenderedCandleRef.current = latestCandle ? { ...latestCandle } : null;
+    fastTickSubscriptionRef.current?.updateSeed(latestCandle ? { ...latestCandle } : null);
+
+    if (FAST_TICK_DIAGNOSTICS) {
+      relayChartDebugLog("chart:fast_tick", {
+        action: "seed_sync",
+        chartId,
+        symbol,
+        timeframe,
+        providerMode: providerMode ?? "unknown",
+        seedTime: latestCandle?.time ?? null,
+        points: data.length,
+      });
+    }
+  }, [chartId, data, fastTickEnabled, providerMode, symbol, timeframe]);
+
   useEffect(() => {
     activeChartRef.current = activeChart ?? null;
   }, [activeChart]);
@@ -715,6 +1078,77 @@ export default function Chart({
   useEffect(() => {
     onReplayStartRef.current = onReplayStart;
   }, [onReplayStart]);
+
+  useEffect(() => {
+    if (!FAST_TICK_DIAGNOSTICS) {
+      return;
+    }
+
+    relayChartDebugLog("chart:fast_tick", {
+      action: fastTickEnabled ? "enabled" : "disabled",
+      chartId,
+      symbol,
+      timeframe,
+      providerMode: providerMode ?? "unknown",
+    });
+  }, [chartId, fastTickEnabled, providerMode, symbol, timeframe]);
+
+  useLayoutEffect(() => {
+    if (!chartReady || !seriesRef.current || !smaSeriesRef.current) {
+      reportFastTickState("chart_not_ready");
+      return;
+    }
+
+    const nextContext: RenderContextState = {
+      symbol,
+      timeframe,
+      providerMode: providerMode ?? "unknown",
+      fastTickEnabled,
+      replayActive: replayActiveForThisChart,
+    };
+    const previousContext = renderContextRef.current;
+
+    if (
+      previousContext &&
+      previousContext.symbol === nextContext.symbol &&
+      previousContext.timeframe === nextContext.timeframe &&
+      previousContext.providerMode === nextContext.providerMode &&
+      previousContext.fastTickEnabled === nextContext.fastTickEnabled &&
+      previousContext.replayActive === nextContext.replayActive
+    ) {
+      return;
+    }
+
+    renderContextRef.current = nextContext;
+
+    let reason = "mount";
+    if (previousContext) {
+      if (previousContext.symbol !== nextContext.symbol) {
+        reason = "symbol_switch";
+      } else if (previousContext.timeframe !== nextContext.timeframe) {
+        reason = "timeframe_switch";
+      } else if (previousContext.providerMode !== nextContext.providerMode) {
+        reason = "provider_switch";
+      } else if (previousContext.fastTickEnabled !== nextContext.fastTickEnabled) {
+        reason = nextContext.fastTickEnabled ? "fast_path_enable" : "fast_path_disable";
+      } else if (previousContext.replayActive !== nextContext.replayActive) {
+        reason = nextContext.replayActive ? "replay_enter" : "replay_exit";
+      } else {
+        reason = "render_context_change";
+      }
+    }
+
+    resetChartRenderState(reason);
+  }, [
+    chartReady,
+    fastTickEnabled,
+    providerMode,
+    replayActiveForThisChart,
+    reportFastTickState,
+    resetChartRenderState,
+    symbol,
+    timeframe,
+  ]);
 
   const setChartReadyState = useCallback((ready: boolean) => {
     if (chartReadyRef.current === ready) return;
@@ -1597,6 +2031,7 @@ export default function Chart({
       drawOverlay();
     });
   }, [drawOverlay]);
+  scheduleOverlayDrawRef.current = scheduleOverlayDraw;
 
   const syncOverlaySize = useCallback(() => {
     const canvas = overlayRef.current;
@@ -2382,6 +2817,15 @@ export default function Chart({
     chart.subscribeClick(handleClick);
 
     return () => {
+      if (FAST_TICK_DIAGNOSTICS) {
+        relayChartDebugLog("chart:reset", {
+          chartId,
+          symbol: symbolRef.current,
+          timeframe: timeframeRef.current,
+          providerMode: providerMode ?? "unknown",
+          reason: "chart_unmount",
+        });
+      }
       container.removeEventListener("mousedown", handleMouseDown);
       container.removeEventListener("dblclick", handleDoubleClick);
       chart.unsubscribeClick(handleClick);
@@ -2428,6 +2872,7 @@ export default function Chart({
     hitTestDrawings,
     hitTestSelectedHandles,
     pointFromCoordinates,
+    providerMode,
     resetDragState,
     scheduleOverlayDraw,
     setActiveChart,
@@ -2438,7 +2883,7 @@ export default function Chart({
     syncOverlaySize,
   ]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!seriesRef.current || !chartRef.current || !smaSeriesRef.current || !chartReady) return;
 
     // LIVE DATA LEAK FIX: Prevent inactive charts from updating during independent replay
@@ -2465,9 +2910,11 @@ export default function Chart({
         }
       }
 
-      const incrementalLiveCandle = shouldApplyReplay
-        ? null
-        : getIncrementalLiveCandle(displayedDataRef.current, displayData);
+      const forceFreshRender = forceFreshRenderRef.current;
+      const incrementalLiveCandle =
+        shouldApplyReplay || forceFreshRender
+          ? null
+          : getIncrementalLiveCandle(displayedDataRef.current, displayData);
       const previousDisplayedData = displayedDataRef.current;
       const normalizedSmaPeriod = sanitizeIndicatorPeriod(smaPeriod);
       const previousSmaState = smaStateRef.current;
@@ -2479,7 +2926,7 @@ export default function Chart({
         period: normalizedSmaPeriod,
       };
       const incrementalSmaPoint =
-        shouldApplyReplay || smaStateChanged || !showSma
+        shouldApplyReplay || forceFreshRender || smaStateChanged || !showSma
           ? null
           : getIncrementalSmaPoint(
               displayedDataRef.current,
@@ -2488,6 +2935,7 @@ export default function Chart({
             );
 
       displayedDataRef.current = displayData;
+      fastRenderedCandleRef.current = displayData[displayData.length - 1] ?? null;
       sessionRangesRef.current = buildSessionRanges(displayData);
       sessionStatsRef.current = buildSessionStats(displayData);
 
@@ -2541,10 +2989,45 @@ export default function Chart({
         }
         smaDataRef.current = nextSmaData;
         smaSeriesRef.current.update(toLinePoint(incrementalSmaPoint));
+        recordSmaDiagnostic("prop_incremental", incrementalSmaPoint);
       } else {
         const smaData = computeSma(displayData, { period: normalizedSmaPeriod });
         smaDataRef.current = smaData;
         smaSeriesRef.current.setData(smaData.map(toLinePoint));
+      }
+
+      if (forceFreshRender) {
+        forceFreshRenderRef.current = false;
+        fastTickResumeBlockedRef.current = shouldApplyReplay || displayData.length === 0;
+
+        if (shouldApplyReplay) {
+          reportFastTickState("replay_active", {
+            action: "blocked_after_reset",
+            reason: "replay_active",
+          });
+        } else if (displayData.length === 0) {
+          reportFastTickState("fresh_render_pending", {
+            action: "waiting_for_seed",
+          });
+        } else if (fastTickEnabled) {
+          reportFastTickState("running", {
+            action: "resume_after_reset",
+            points: displayData.length,
+            time: displayData[displayData.length - 1]?.time ?? null,
+          });
+        }
+      } else if (shouldApplyReplay) {
+        fastTickResumeBlockedRef.current = true;
+        reportFastTickState("replay_active");
+      } else if (displayData.length === 0) {
+        fastTickResumeBlockedRef.current = true;
+        if (fastTickEnabled) {
+          reportFastTickState("fresh_render_pending", {
+            action: "waiting_for_seed",
+          });
+        }
+      } else {
+        fastTickResumeBlockedRef.current = false;
       }
 
       if (!hasInitialData.current && displayData.length > 0) {
@@ -2587,6 +3070,9 @@ export default function Chart({
     smaPeriod,
     symbol,
     timeframe,
+    fastTickEnabled,
+    recordSmaDiagnostic,
+    reportFastTickState,
   ]);
 
   useEffect(() => {

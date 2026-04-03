@@ -73,6 +73,10 @@ export function computeSma(candles: IndicatorCandle[], config: SmaConfig): Indic
   return SMA_INDICATOR.compute(candles, config);
 }
 
+function indicatorCandlesEqual(left: IndicatorCandle, right: IndicatorCandle): boolean {
+  return left.time === right.time && left.close === right.close;
+}
+
 export function getIncrementalSmaPoint(
   previous: IndicatorCandle[],
   next: IndicatorCandle[],
@@ -90,19 +94,19 @@ export function getIncrementalSmaPoint(
     }
 
     for (let index = 0; index < next.length - 1; index += 1) {
-      if (previous[index] !== next[index]) {
+      if (!indicatorCandlesEqual(previous[index], next[index])) {
         return null;
       }
     }
 
-    return previous[previous.length - 1] === next[next.length - 1]
+    return indicatorCandlesEqual(previous[previous.length - 1], next[next.length - 1])
       ? null
       : computeSmaPoint(next, next.length - 1, normalizedPeriod);
   }
 
   if (next.length === previous.length + 1) {
     for (let index = 0; index < previous.length; index += 1) {
-      if (previous[index] !== next[index]) {
+      if (!indicatorCandlesEqual(previous[index], next[index])) {
         return null;
       }
     }

@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "providerMode": "snapshot_replay",
+  "generatedAt": "2026-04-03T18:45:56.744268+00:00",
+  "symbols": [
+    {
+      "id": "spx",
+      "label": "S&P 500",
+      "yahooTicker": "^GSPC",
+      "timeframes": [
+        {
+          "timeframe": "1m",
+          "path": "/snapshots/spx-1m.json",
+          "intervalSeconds": 60,
+          "candleCount": 1948,
+          "splitIndex": 974,
+          "startTime": 1774618200,
+          "endTime": 1775159940
+        },
+        {
+          "timeframe": "3m",
+          "path": "/snapshots/spx-3m.json",
+          "intervalSeconds": 180,
+          "candleCount": 650,
+          "splitIndex": 325,
+          "startTime": 1774618200,
+          "endTime": 1775159820
+        }
+      ]
+    },
+    {
+      "id": "ndx",
+      "label": "Nasdaq-100",
+      "yahooTicker": "^NDX",
+      "timeframes": [
+        {
+          "timeframe": "1m",
+          "path": "/snapshots/ndx-1m.json",
+          "intervalSeconds": 60,
+          "candleCount": 1948,
+          "splitIndex": 974,
+          "startTime": 1774618200,
+          "endTime": 1775159940
+        },
+        {
+          "timeframe": "3m",
+          "path": "/snapshots/ndx-3m.json",
+          "intervalSeconds": 180,
+          "candleCount": 650,
+          "splitIndex": 325,
+          "startTime": 1774618200,
+          "endTime": 1775159820
+        }
+      ]
+    }
+  ]
+}

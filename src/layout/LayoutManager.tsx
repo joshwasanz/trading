@@ -12,6 +12,7 @@ import { useLayoutState } from "../store/useLayoutState";
 import type {
   Candle,
   HistoryUiState,
+  ProviderMode,
   SupportedSymbol,
   Timeframe,
 } from "../types/marketData";
@@ -75,6 +76,8 @@ type LayoutManagerProps = {
   showSessionRanges?: boolean;
   showSma?: boolean;
   smaPeriod?: number;
+  fastTickEnabled?: boolean;
+  providerMode?: ProviderMode | null;
   historyUiStates?: Record<string, HistoryUiState>;
   registerHistoryControls?: (controls: {
     canUndo: boolean;
@@ -519,12 +522,14 @@ export default function LayoutManager({
   isReplaySync,
   onReplayStart,
   supportedSymbols = [],
-  supportedTimeframes = ["1m", "3m"],
+  supportedTimeframes = ["15s", "1m", "3m"],
   showSessions,
   showSessionLevels,
   showSessionRanges,
   showSma,
   smaPeriod,
+  fastTickEnabled = false,
+  providerMode = null,
   historyUiStates,
   registerHistoryControls,
 }: LayoutManagerProps) {
@@ -955,6 +960,8 @@ export default function LayoutManager({
         showSessionRanges={showSessionRanges}
         showSma={showSma}
         smaPeriod={smaPeriod}
+        fastTickEnabled={fastTickEnabled}
+        providerMode={providerMode}
       />
     ),
     [
@@ -990,6 +997,8 @@ export default function LayoutManager({
       showSessions,
       showSma,
       smaPeriod,
+      fastTickEnabled,
+      providerMode,
       supportedSymbols,
       supportedTimeframes,
       tool,

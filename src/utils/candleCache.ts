@@ -52,6 +52,10 @@ function normalizeStoredCandle(
     typeof maybe.low === "number" && Number.isFinite(maybe.low) ? maybe.low : null;
   const close =
     typeof maybe.close === "number" && Number.isFinite(maybe.close) ? maybe.close : null;
+  const volume =
+    typeof maybe.volume === "number" && Number.isFinite(maybe.volume)
+      ? Math.max(0, maybe.volume)
+      : undefined;
 
   if (time === null || open === null || high === null || low === null || close === null) {
     return null;
@@ -69,6 +73,7 @@ function normalizeStoredCandle(
     high: Math.max(high, open, close),
     low: Math.min(low, open, close),
     close,
+    volume,
   };
 }
 

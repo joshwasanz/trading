@@ -7,6 +7,7 @@ export type Candle = {
   high: number;
   low: number;
   close: number;
+  volume?: number;
 };
 
 export type SupportedSymbol = {
@@ -14,7 +15,7 @@ export type SupportedSymbol = {
   label: string;
 };
 
-export type ProviderMode = "synthetic" | "twelve_data";
+export type ProviderMode = "synthetic" | "twelve_data" | "snapshot_replay";
 
 export type ProviderCapabilities = {
   providerMode: ProviderMode;

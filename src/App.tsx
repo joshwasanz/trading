@@ -23,6 +23,7 @@ import type {
 import type { ReplayStartPayload } from "./types/replay";
 import { getSessionRange, type SessionKey } from "./utils/sessions";
 import { DEFAULT_SMA_PERIOD, sanitizeIndicatorPeriod } from "./utils/indicators";
+import { FAST_TICK_INTERVAL_MS } from "./utils/fastTickEngine";
 import {
   DEFAULT_PANELS,
   DEFAULT_LAYOUT_TYPE,
@@ -49,10 +50,13 @@ import type { Workspace } from "./types/workspace";
 const DATA_STORAGE_KEY = "chart-data-v3";
 const LEGACY_DATA_STORAGE_KEYS = ["chart-data-v1", "chart-data-v2"];
 const MAX_HISTORY_BACKFILL_ATTEMPTS = 5;
-const DEFAULT_SUPPORTED_TIMEFRAMES: Timeframe[] = ["1m", "3m"];
+const DEFAULT_SUPPORTED_TIMEFRAMES: Timeframe[] = ["15s", "1m", "3m"];
 const DEBUG_LIVE_UPDATES = import.meta.env.DEV;
 const VERBOSE_LIVE_DEBUG =
   DEBUG_LIVE_UPDATES && import.meta.env.VITE_VERBOSE_LIVE_DEBUG === "true";
+const CONFIGURED_FAST_TICK_ENGINE = parseOptionalBooleanEnv(
+  import.meta.env.VITE_ENABLE_FAST_TICK_ENGINE
+);
 
 type ProviderStatusEvent = {
   kind: "error" | "info";
@@ -77,6 +81,27 @@ function relayFrontendDebugLog(scope: string, payload: unknown) {
     scope,
     payload: JSON.stringify(payload),
   }).catch(() => undefined);
+}
+
+function parseOptionalBooleanEnv(value: unknown): boolean | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+
+  if (normalized === "false" || normalized === "0" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+
+  return null;
 }
 
 type Panel = {
@@ -756,6 +781,17 @@ function AppInner() {
     ? providerBootState.providerMode
     : null;
   const providerRuntimeReady = providerBootState.status === "ready";
+  const fastTickEnabled = useMemo(() => {
+    if (!providerRuntimeReady || !liveSupported) {
+      return false;
+    }
+
+    if (CONFIGURED_FAST_TICK_ENGINE !== null) {
+      return CONFIGURED_FAST_TICK_ENGINE;
+    }
+
+    return providerMode === "snapshot_replay" || providerMode === "synthetic";
+  }, [liveSupported, providerMode, providerRuntimeReady]);
 
   const getReplayPanelState = useCallback(
     (panelId: string | null) => {
@@ -2655,6 +2691,9 @@ function AppInner() {
               </div>
               <div>Live: {providerLiveSource ?? "real_poll"}</div>
               <div>Poll: {providerPollIntervalMs ?? 15_000}ms</div>
+              <div>
+                Render: {fastTickEnabled ? `fast_tick @ ${FAST_TICK_INTERVAL_MS}ms` : "data_only"}
+              </div>
               <div>Strict: {strictRealtime ? "on" : "off"}</div>
               <div>
                 Last event: {formatValidationTimestamp(validationStatus.lastLiveEventTime)}
@@ -2694,6 +2733,8 @@ function AppInner() {
             showSessionRanges={showSessionRanges}
             showSma={showSma}
             smaPeriod={smaPeriod}
+            fastTickEnabled={fastTickEnabled}
+            providerMode={providerMode}
             historyUiStates={historyUiStates}
             registerHistoryControls={registerHistoryControls}
           />
