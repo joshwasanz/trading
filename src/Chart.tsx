@@ -490,6 +490,41 @@ function getIncrementalLiveCandle(previous: Candle[], next: Candle[]): Candle | 
   return null;
 }
 
+function seriesDataEquivalent(left: Candle[], right: Candle[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (!candlesEquivalent(left[index], right[index])) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function mergeCanonicalSeriesWithoutTouchingLiveTail(
+  canonical: Candle[],
+  currentDisplayed: Candle[]
+): Candle[] {
+  if (canonical.length === 0 || currentDisplayed.length === 0) {
+    return canonical;
+  }
+
+  const displayedTail = currentDisplayed[currentDisplayed.length - 1];
+  const canonicalTail = canonical[canonical.length - 1];
+  const displayedTailTime = displayedTail.time;
+  const canonicalTailTime = canonicalTail.time;
+
+  if (canonicalTailTime <= displayedTailTime) {
+    const canonicalWithoutTail = canonical.filter((bar) => bar.time < displayedTailTime);
+    return [...canonicalWithoutTail, displayedTail];
+  }
+
+  return canonical;
+}
+
 function getFastTickSmaPoint(
   candles: Candle[],
   fastCandle: Candle,
@@ -537,6 +572,8 @@ type FastTickBlockReason =
   | "no_canonical_candle"
   | "seed_mismatch"
   | "running";
+
+type LiveApplyMode = "seed" | "live" | "replay";
 
 type RenderContextState = {
   symbol: string;
@@ -634,6 +671,8 @@ export default function Chart({
   const fastTickSubscriptionRef = useRef<FastTickSubscription | null>(null);
   const forceFreshRenderRef = useRef(true);
   const fastTickResumeBlockedRef = useRef(true);
+  const liveModeRef = useRef<LiveApplyMode>("seed");
+  const lastRenderedTimeRef = useRef<number | null>(null);
   const fastTickBlockReasonRef = useRef<FastTickBlockReason>("chart_not_ready");
   const renderContextRef = useRef<RenderContextState | null>(null);
   const fastTickSeriesUpdateCountRef = useRef(0);
@@ -745,10 +784,90 @@ export default function Chart({
     [chartId, providerMode]
   );
 
+  const assertNoLiveSetData = useCallback(
+    (reason: string, allowDuringLive = false) => {
+      if (!FAST_TICK_DIAGNOSTICS || allowDuringLive || liveModeRef.current !== "live") {
+        return;
+      }
+
+      relayChartDebugLog("chart:violation", {
+        chartId,
+        symbol: symbolRef.current,
+        timeframe: timeframeRef.current,
+        providerMode: providerMode ?? "unknown",
+        reason,
+        message: "setData attempted during live mode",
+      });
+    },
+    [chartId, providerMode]
+  );
+
+  const applySeedSeries = useCallback(
+    (
+      nextData: Candle[],
+      mode: LiveApplyMode,
+      reason: string,
+      options?: {
+        allowDuringLive?: boolean;
+      }
+    ) => {
+      const series = seriesRef.current;
+      if (!series) {
+        return;
+      }
+
+      assertNoLiveSetData(reason, options?.allowDuringLive ?? false);
+      series.setData(nextData.map(toChartCandle));
+      displayedDataRef.current = nextData.slice();
+      fastRenderedCandleRef.current = nextData[nextData.length - 1] ?? null;
+      lastRenderedTimeRef.current = nextData.length > 0 ? nextData[nextData.length - 1].time : null;
+      liveModeRef.current = nextData.length > 0 ? mode : "seed";
+    },
+    [assertNoLiveSetData]
+  );
+
+  const applyLiveCandle = useCallback((nextCandle: Candle) => {
+    if (liveModeRef.current !== "live") {
+      return false;
+    }
+
+    const nextTime = nextCandle.time;
+    const lastRenderedTime = lastRenderedTimeRef.current;
+    if (lastRenderedTime !== null && nextTime < lastRenderedTime) {
+      return false;
+    }
+
+    const series = seriesRef.current;
+    if (!series) {
+      return false;
+    }
+
+    series.update(toChartCandle(nextCandle));
+
+    const current = displayedDataRef.current;
+    if (current.length === 0) {
+      displayedDataRef.current = [nextCandle];
+    } else if (current[current.length - 1].time === nextTime) {
+      const nextDisplayed = current.slice();
+      nextDisplayed[nextDisplayed.length - 1] = nextCandle;
+      displayedDataRef.current = nextDisplayed;
+    } else if (nextTime > current[current.length - 1].time) {
+      displayedDataRef.current = [...current, nextCandle];
+    } else {
+      return false;
+    }
+
+    fastRenderedCandleRef.current = nextCandle;
+    lastRenderedTimeRef.current = nextTime;
+    return true;
+  }, []);
+
   const resetChartRenderState = useCallback(
     (reason: string) => {
       forceFreshRenderRef.current = true;
       fastTickResumeBlockedRef.current = true;
+      liveModeRef.current = "seed";
+      lastRenderedTimeRef.current = null;
       fastTickSeriesUpdateCountRef.current = 0;
       fastTickSmaUpdateCountRef.current = 0;
       propSmaUpdateCountRef.current = 0;
@@ -926,9 +1045,17 @@ export default function Chart({
         return;
       }
 
+      if (!applyLiveCandle(tickCandle)) {
+        reportFastTickState("seed_mismatch", {
+          latestCandleTime: latestCandle.time,
+          tickTime: tickCandle.time,
+          timeframeSeconds,
+          reason: "live_apply_rejected",
+        });
+        return;
+      }
+
       reportFastTickState("running");
-      fastRenderedCandleRef.current = tickCandle;
-      series.update(toChartCandle(tickCandle));
       fastTickSeriesUpdateCountRef.current += 1;
 
       if (
@@ -996,6 +1123,7 @@ export default function Chart({
       }
     };
   }, [
+    applyLiveCandle,
     chartId,
     fastTickEnabled,
     providerMode,
@@ -2889,7 +3017,7 @@ export default function Chart({
     // LIVE DATA LEAK FIX: Prevent inactive charts from updating during independent replay
     try {
       const displaySource = "prop";
-      let displayData: Candle[] = data;
+      let canonicalDisplayData: Candle[] = data;
 
       // When replay selection is armed, keep the full chart visible so the user can pick any candle.
       const shouldApplyReplay =
@@ -2900,22 +3028,34 @@ export default function Chart({
           ? replayCursorTime !== null
           : activeChart === chartId);
 
-      if (shouldApplyReplay && displayData.length > 0) {
+      if (shouldApplyReplay && canonicalDisplayData.length > 0) {
         if (replayCursorTime !== null) {
-          const replayEndIndex = findCandleIndexAtOrBefore(displayData, replayCursorTime);
-          displayData = displayData.slice(0, replayEndIndex + 1);
+          const replayEndIndex = findCandleIndexAtOrBefore(canonicalDisplayData, replayCursorTime);
+          canonicalDisplayData = canonicalDisplayData.slice(0, replayEndIndex + 1);
         } else {
-          const safeIndex = Math.max(0, Math.min(replayIndex, displayData.length - 1));
-          displayData = displayData.slice(0, safeIndex + 1);
+          const safeIndex = Math.max(0, Math.min(replayIndex, canonicalDisplayData.length - 1));
+          canonicalDisplayData = canonicalDisplayData.slice(0, safeIndex + 1);
         }
       }
 
       const forceFreshRender = forceFreshRenderRef.current;
-      const incrementalLiveCandle =
-        shouldApplyReplay || forceFreshRender
-          ? null
-          : getIncrementalLiveCandle(displayedDataRef.current, displayData);
       const previousDisplayedData = displayedDataRef.current;
+      const displayData =
+        !shouldApplyReplay && !forceFreshRender && liveModeRef.current === "live"
+          ? mergeCanonicalSeriesWithoutTouchingLiveTail(
+              canonicalDisplayData,
+              previousDisplayedData
+            )
+          : canonicalDisplayData;
+      const shouldSeedSeries =
+        forceFreshRender || shouldApplyReplay || liveModeRef.current !== "live";
+      const incrementalLiveCandle = shouldSeedSeries
+        ? null
+        : getIncrementalLiveCandle(previousDisplayedData, displayData);
+      const structuralSeriesChange =
+        !shouldSeedSeries &&
+        !incrementalLiveCandle &&
+        !seriesDataEquivalent(previousDisplayedData, displayData);
       const normalizedSmaPeriod = sanitizeIndicatorPeriod(smaPeriod);
       const previousSmaState = smaStateRef.current;
       const smaStateChanged =
@@ -2926,47 +3066,57 @@ export default function Chart({
         period: normalizedSmaPeriod,
       };
       const incrementalSmaPoint =
-        shouldApplyReplay || forceFreshRender || smaStateChanged || !showSma
+        shouldSeedSeries || structuralSeriesChange || smaStateChanged || !showSma
           ? null
           : getIncrementalSmaPoint(
-              displayedDataRef.current,
+              previousDisplayedData,
               displayData,
               normalizedSmaPeriod
             );
+      let renderedData = previousDisplayedData;
+      let seriesUpdateMode: "update" | "setData" | "none" = "none";
+      let seriesUpdateAction = "noop";
 
-      displayedDataRef.current = displayData;
-      fastRenderedCandleRef.current = displayData[displayData.length - 1] ?? null;
-      sessionRangesRef.current = buildSessionRanges(displayData);
-      sessionStatsRef.current = buildSessionStats(displayData);
-
-      if (incrementalLiveCandle) {
-        seriesRef.current.update(toChartCandle(incrementalLiveCandle));
-        relayChartDebugLog("chart:series:update", {
-          chartId,
-          symbol,
-          timeframe,
-          mode: "update",
-          action:
-            previousDisplayedData[previousDisplayedData.length - 1]?.time === incrementalLiveCandle.time
-              ? "replace"
-              : "append",
-          time: incrementalLiveCandle.time,
-          close: incrementalLiveCandle.close,
-          points: displayData.length,
-          source: displaySource,
-          replay: shouldApplyReplay,
+      if (shouldSeedSeries) {
+        applySeedSeries(
+          displayData,
+          shouldApplyReplay ? "replay" : "live",
+          shouldApplyReplay ? "replay_seed" : "seed_render"
+        );
+        renderedData = displayedDataRef.current;
+        seriesUpdateMode = "setData";
+        seriesUpdateAction = shouldApplyReplay ? "replay_reload" : "seed";
+      } else if (incrementalLiveCandle && applyLiveCandle(incrementalLiveCandle)) {
+        renderedData = displayedDataRef.current;
+        seriesUpdateMode = "update";
+        seriesUpdateAction =
+          previousDisplayedData[previousDisplayedData.length - 1]?.time === incrementalLiveCandle.time
+            ? "replace"
+            : "append";
+      } else if (structuralSeriesChange) {
+        liveModeRef.current = "seed";
+        applySeedSeries(displayData, "live", "canonical_reconcile", {
+          allowDuringLive: true,
         });
-      } else {
-        seriesRef.current.setData(displayData.map(toChartCandle));
+        renderedData = displayedDataRef.current;
+        seriesUpdateMode = "setData";
+        seriesUpdateAction = "canonical_reconcile";
+      }
+
+      fastRenderedCandleRef.current = renderedData[renderedData.length - 1] ?? null;
+      sessionRangesRef.current = buildSessionRanges(renderedData);
+      sessionStatsRef.current = buildSessionStats(renderedData);
+
+      if (seriesUpdateMode !== "none") {
         relayChartDebugLog("chart:series:update", {
           chartId,
           symbol,
           timeframe,
-          mode: "setData",
-          action: "reload",
-          time: displayData[displayData.length - 1]?.time ?? null,
-          close: displayData[displayData.length - 1]?.close ?? null,
-          points: displayData.length,
+          mode: seriesUpdateMode,
+          action: seriesUpdateAction,
+          time: renderedData[renderedData.length - 1]?.time ?? null,
+          close: renderedData[renderedData.length - 1]?.close ?? null,
+          points: renderedData.length,
           source: displaySource,
           replay: shouldApplyReplay,
         });
@@ -2991,35 +3141,35 @@ export default function Chart({
         smaSeriesRef.current.update(toLinePoint(incrementalSmaPoint));
         recordSmaDiagnostic("prop_incremental", incrementalSmaPoint);
       } else {
-        const smaData = computeSma(displayData, { period: normalizedSmaPeriod });
+        const smaData = computeSma(renderedData, { period: normalizedSmaPeriod });
         smaDataRef.current = smaData;
         smaSeriesRef.current.setData(smaData.map(toLinePoint));
       }
 
       if (forceFreshRender) {
         forceFreshRenderRef.current = false;
-        fastTickResumeBlockedRef.current = shouldApplyReplay || displayData.length === 0;
+        fastTickResumeBlockedRef.current = shouldApplyReplay || renderedData.length === 0;
 
         if (shouldApplyReplay) {
           reportFastTickState("replay_active", {
             action: "blocked_after_reset",
             reason: "replay_active",
           });
-        } else if (displayData.length === 0) {
+        } else if (renderedData.length === 0) {
           reportFastTickState("fresh_render_pending", {
             action: "waiting_for_seed",
           });
         } else if (fastTickEnabled) {
           reportFastTickState("running", {
             action: "resume_after_reset",
-            points: displayData.length,
-            time: displayData[displayData.length - 1]?.time ?? null,
+            points: renderedData.length,
+            time: renderedData[renderedData.length - 1]?.time ?? null,
           });
         }
       } else if (shouldApplyReplay) {
         fastTickResumeBlockedRef.current = true;
         reportFastTickState("replay_active");
-      } else if (displayData.length === 0) {
+      } else if (renderedData.length === 0) {
         fastTickResumeBlockedRef.current = true;
         if (fastTickEnabled) {
           reportFastTickState("fresh_render_pending", {
@@ -3030,7 +3180,7 @@ export default function Chart({
         fastTickResumeBlockedRef.current = false;
       }
 
-      if (!hasInitialData.current && displayData.length > 0) {
+      if (!hasInitialData.current && renderedData.length > 0) {
         if (chartReadyRef.current) {
           hasInitialData.current = true;
           if (dataFitFrameRef.current !== null) {
@@ -3055,6 +3205,8 @@ export default function Chart({
     }
   }, [
     activeChart,
+    applyLiveCandle,
+    applySeedSeries,
     chartReady,
     chartId,
     data,

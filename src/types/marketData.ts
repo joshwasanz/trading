@@ -15,7 +15,7 @@ export type SupportedSymbol = {
   label: string;
 };
 
-export type ProviderMode = "synthetic" | "twelve_data" | "snapshot_replay";
+export type ProviderMode = "synthetic" | "twelve_data" | "snapshot_replay" | "unknown";
 
 export type ProviderCapabilities = {
   providerMode: ProviderMode;

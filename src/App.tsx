@@ -2221,26 +2221,61 @@ function AppInner() {
     showProviderNotice,
   ]);
 
-  // Persist chart data to localStorage on every change
+  // Persist chart data away from the hot path.
   useEffect(() => {
     if (!providerMode || !providerRuntimeReady) {
       return;
     }
 
-    try {
-      persistScopedCandleCacheEnvelope(
-        window.localStorage,
-        DATA_STORAGE_KEY,
-        LEGACY_DATA_STORAGE_KEYS,
-        providerMode,
-        {
-          data,
-          latestFetches: latestWindowFetches,
-        }
-      );
-    } catch (error) {
-      console.error("[App] Failed to cache chart data:", error);
-    }
+    let cancelled = false;
+    const snapshot = {
+      data,
+      latestFetches: latestWindowFetches,
+    };
+    const persistSnapshot = () => {
+      if (cancelled) {
+        return;
+      }
+
+      try {
+        persistScopedCandleCacheEnvelope(
+          window.localStorage,
+          DATA_STORAGE_KEY,
+          LEGACY_DATA_STORAGE_KEYS,
+          providerMode,
+          snapshot
+        );
+      } catch (error) {
+        console.error("[App] Failed to cache chart data:", error);
+      }
+    };
+
+    const timerId = window.setTimeout(() => {
+      if (cancelled) {
+        return;
+      }
+
+      const idleWindow = window as Window & {
+        requestIdleCallback?: (
+          callback: IdleRequestCallback,
+          options?: IdleRequestOptions
+        ) => number;
+      };
+
+      if (typeof idleWindow.requestIdleCallback === "function") {
+        idleWindow.requestIdleCallback(() => {
+          persistSnapshot();
+        }, { timeout: 1000 });
+        return;
+      }
+
+      persistSnapshot();
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+    };
   }, [data, latestWindowFetches, providerMode, providerRuntimeReady]);
 
   // Apply theme CSS variables

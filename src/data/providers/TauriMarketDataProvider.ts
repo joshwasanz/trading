@@ -37,6 +37,19 @@ const DEBUG_LIVE_UPDATES = import.meta.env.DEV;
 const VERBOSE_LIVE_DEBUG =
   DEBUG_LIVE_UPDATES && import.meta.env.VITE_VERBOSE_LIVE_DEBUG === "true";
 
+function normalizeProviderMode(rawMode: unknown): ProviderCapabilities["providerMode"] {
+  if (
+    rawMode === "synthetic" ||
+    rawMode === "twelve_data" ||
+    rawMode === "snapshot_replay" ||
+    rawMode === "unknown"
+  ) {
+    return rawMode;
+  }
+
+  return "unknown";
+}
+
 function relayFrontendDebugLog(scope: string, payload: unknown) {
   if (!DEBUG_LIVE_UPDATES) {
     return;
@@ -96,7 +109,7 @@ function normalizeCapabilities(raw: ProviderCapabilities): ProviderCapabilities 
   const supportedSymbols = normalizeSupportedSymbols(raw?.supportedSymbols ?? []);
 
   return {
-    providerMode: raw?.providerMode === "twelve_data" ? "twelve_data" : "synthetic",
+    providerMode: normalizeProviderMode(raw?.providerMode),
     supportedSymbols,
     supportedTimeframes: normalizeSupportedTimeframes(raw?.supportedTimeframes),
     liveSupported: Boolean(raw?.liveSupported),
